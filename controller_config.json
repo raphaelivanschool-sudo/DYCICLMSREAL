@@ -1,0 +1,25 @@
+{
+  "window": {
+    "width": 1200,
+    "height": 800,
+    "x": 100,
+    "y": 100
+  },
+  "screenshot_interval": 5,
+  "auto_detect_interval": 30,
+  "known_pcs": [
+    {
+      "hostname": "PC-01",
+      "ip": "192.168.1.10",
+      "api_key": "sk_pc_agent_CHANGE_ME",
+      "connection_type": "Ethernet",
+      "last_seen": "2026-04-21 10:30:45"
+    }
+  ],
+  "general": {
+    "dark_mode": false,
+    "log_level": "INFO"
+  },
+  "selected_pc_ip": "192.168.1.10"
+}
+

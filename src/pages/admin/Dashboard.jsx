@@ -1,8 +1,5 @@
 import { useState, useEffect } from 'react';
 import { dashboardApi } from '../../services/api.js';
-import DeveloperMode from '../../components/DeveloperMode.jsx';
-import DeveloperModeNew from '../../components/DeveloperMode-new.jsx';
-import PCControlPanel from '../../components/PCControlPanel.jsx';
 import {
   Building2,
   Monitor,
@@ -21,7 +18,7 @@ import {
   UserCog,
   GraduationCap,
   Shield,
-  Code
+  Code2
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 
@@ -85,9 +82,6 @@ function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [lastUpdated, setLastUpdated] = useState(null);
-  const [showDeveloperMode, setShowDeveloperMode] = useState(false);
-  const [showDeveloperModeNew, setShowDeveloperModeNew] = useState(false);
-  const [showPCControl, setShowPCControl] = useState(false);
 
   // Fetch dashboard data
   const fetchDashboardData = async () => {
@@ -552,6 +546,13 @@ function Dashboard() {
             <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
             Refresh
           </button>
+          <button
+            onClick={() => navigate('/admin/developer')}
+            className="flex items-center px-4 py-2 bg-indigo-600 border border-indigo-600 rounded-lg text-sm font-medium text-white hover:bg-indigo-700 transition-colors"
+          >
+            <Code2 className="w-4 h-4 mr-2" />
+            Developer Mode
+          </button>
         </div>
       </div>
 
@@ -578,55 +579,6 @@ function Dashboard() {
         </div>
       </div>
 
-      {/* Developer Mode Button */}
-      <div className="flex justify-center pt-8 border-t border-gray-200">
-        <button 
-          onClick={() => setShowDeveloperMode(true)}
-          className="flex items-center gap-2 px-6 py-3 bg-gray-900 text-white rounded-lg hover:bg-gray-800 transition-colors font-medium"
-        >
-          <Code className="w-5 h-5" />
-          Developer Mode
-        </button>
-      </div>
-
-      {/* Developer Mode Modal */}
-      {showDeveloperMode && (
-        <DeveloperMode onClose={() => setShowDeveloperMode(false)} />
-      )}
-
-      {/* Developer Mode New Button */}
-      <div className="flex justify-center pt-4">
-        <button
-          onClick={() => setShowDeveloperModeNew(true)}
-          className="flex items-center gap-2 px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium"
-        >
-          <Monitor className="w-5 h-5" />
-          Developer Mode (New)
-        </button>
-      </div>
-
-      {/* Developer Mode New Modal */}
-      {showDeveloperModeNew && (
-        <DeveloperModeNew onClose={() => setShowDeveloperModeNew(false)} />
-      )}
-
-      {/* PC Control Panel Section */}
-      <div className="mt-8">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-xl font-bold text-gray-900">Lab Computer Management</h2>
-          <button
-            onClick={() => setShowPCControl(!showPCControl)}
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-          >
-            <Monitor className="w-5 h-5" />
-            {showPCControl ? 'Hide PC Control' : 'Show PC Control'}
-          </button>
-        </div>
-        
-        {showPCControl && (
-          <PCControlPanel />
-        )}
-      </div>
     </div>
   );
 }

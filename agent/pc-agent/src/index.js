@@ -6,10 +6,12 @@ import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import dgram from 'dgram';
 // PowerShell functionality removed - using exec commands instead
 // import screenshot from 'screenshot-desktop'; // Temporarily disabled
 import { spawn, exec } from 'child_process';
 import { promisify } from 'util';
+import { runPythonDiscovery } from './pythonDiscovery.js';
 
 const execAsync = promisify(exec);
 
@@ -31,6 +33,13 @@ class PCAgent {
     this.heartbeatInterval = null;
     this.vncProcess = null;
     this.logger = this.createLogger();
+    
+    // UDP Service Discovery
+    this.discoverySocket = null;
+    this.discoveryInterval = null;
+    this.DISCOVERY_PORT = 41234;
+    this.DISCOVERY_INTERVAL = 30000; // 30 seconds
+    this.vncPort = 5900;
   }
 
   createLogger() {
@@ -170,6 +179,131 @@ class PCAgent {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   }
 
+  // UDP Service Discovery - Broadcast TightVNC availability
+  async startServiceDiscovery() {
+    try {
+      if (this.discoverySocket) {
+        return; // Already started
+      }
+
+      this.discoverySocket = dgram.createSocket('udp4');
+      
+      this.discoverySocket.on('error', (err) => {
+        this.logger.error('Discovery socket error:', err);
+      });
+
+      this.discoverySocket.on('listening', () => {
+        this.discoverySocket.setBroadcast(true);
+        this.logger.info('UDP service discovery started');
+        
+        // Send initial announcement
+        this.sendDiscoveryAnnouncement();
+        
+        // Set up periodic announcements
+        this.discoveryInterval = setInterval(() => {
+          this.sendDiscoveryAnnouncement();
+        }, this.DISCOVERY_INTERVAL);
+      });
+
+      // Bind to any available port
+      this.discoverySocket.bind(0, () => {
+        this.discoverySocket.setBroadcast(true);
+      });
+      
+    } catch (error) {
+      this.logger.error('Failed to start service discovery:', error);
+    }
+  }
+
+  stopServiceDiscovery() {
+    if (this.discoveryInterval) {
+      clearInterval(this.discoveryInterval);
+      this.discoveryInterval = null;
+    }
+    if (this.discoverySocket) {
+      this.discoverySocket.close();
+      this.discoverySocket = null;
+      this.logger.info('UDP service discovery stopped');
+    }
+  }
+
+  async sendDiscoveryAnnouncement() {
+    try {
+      const systemInfo = await this.getSystemInfo();
+      
+      // Check if VNC is actually running
+      const vncRunning = await this.isVNCRunning();
+      
+      const announcement = {
+        type: 'tightvnc-announce',
+        computerId: this.config.computerId,
+        hostname: systemInfo.hostname,
+        ip: systemInfo.ip,
+        port: this.vncPort,
+        hasAgent: true,
+        vncRunning: vncRunning,
+        timestamp: new Date().toISOString()
+      };
+      
+      const message = Buffer.from(JSON.stringify(announcement));
+      
+      // Broadcast to all interfaces
+      const broadcastAddresses = this.getBroadcastAddresses();
+      
+      for (const broadcastAddr of broadcastAddresses) {
+        this.discoverySocket.send(message, this.DISCOVERY_PORT, broadcastAddr, (err) => {
+          if (err) {
+            this.logger.debug(`Discovery broadcast failed to ${broadcastAddr}: ${err.message}`);
+          } else {
+            this.logger.debug(`Discovery announcement sent to ${broadcastAddr}:${this.DISCOVERY_PORT}`);
+          }
+        });
+      }
+    } catch (error) {
+      this.logger.error('Failed to send discovery announcement:', error);
+    }
+  }
+
+  // Get broadcast addresses for all network interfaces
+  getBroadcastAddresses() {
+    const addresses = [];
+    const interfaces = os.networkInterfaces();
+    
+    for (const name of Object.keys(interfaces)) {
+      for (const iface of interfaces[name]) {
+        if (iface.family === 'IPv4' && !iface.internal) {
+          // Calculate broadcast address
+          const ip = iface.address;
+          const netmask = iface.netmask;
+          if (ip && netmask) {
+            const ipParts = ip.split('.').map(Number);
+            const maskParts = netmask.split('.').map(Number);
+            const broadcastParts = ipParts.map((part, i) => part | (~maskParts[i] & 255));
+            addresses.push(broadcastParts.join('.'));
+          }
+        }
+      }
+    }
+    
+    // Fallback to common broadcast addresses if no interfaces found
+    if (addresses.length === 0) {
+      addresses.push('255.255.255.255');
+    }
+    
+    return addresses;
+  }
+
+  // Check if TightVNC is currently running
+  async isVNCRunning() {
+    try {
+      // Check if tvnserver process exists
+      const { stdout } = await execAsync('tasklist /FI "IMAGENAME eq tvnserver.exe" /FO CSV /NH');
+      return stdout.includes('tvnserver.exe');
+    } catch (error) {
+      return false;
+    }
+  }
+
   async connect() {
     try {
       this.logger.info(`Connecting to server: ${this.config.serverUrl}`);
@@ -204,6 +338,9 @@ class PCAgent {
       
       // Start heartbeat
       this.startHeartbeat();
+      
+      // Start UDP service discovery broadcasting
+      this.startServiceDiscovery();
     });
 
     // Registration acknowledged
@@ -223,6 +360,7 @@ class PCAgent {
     this.socket.on('disconnect', (reason) => {
       this.logger.info('Disconnected: ' + reason);
       this.stopHeartbeat();
+      this.stopServiceDiscovery();
     });
 
     // Reconnecting
@@ -305,6 +443,13 @@ class PCAgent {
         //   break;
         case 'get-info':
           result = await this.getSystemInfo();
+          break;
+        case 'discover-peers':
+          result = await runPythonDiscovery({
+            subnet: params?.subnet,
+            registryOnly: Boolean(params?.registryOnly),
+            timeoutMs: params?.timeoutMs
+          });
           break;
         default:
           result = { success: false, error: `Unknown command: ${action}` };

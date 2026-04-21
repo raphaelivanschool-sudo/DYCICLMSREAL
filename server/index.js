@@ -7,6 +7,8 @@ import { createServer } from "http";
 import { Server } from "socket.io";
 import { PrismaClient } from "@prisma/client";
 import jwt from "jsonwebtoken";
+import dgram from "dgram";
+import os from "os";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -14,8 +16,11 @@ const __dirname = dirname(__filename);
 // Load environment variables from server/.env
 dotenv.config({ path: join(__dirname, ".env") });
 
-console.log("JWT_SECRET loaded:", process.env.JWT_SECRET ? "YES" : "NO");
-console.log("DATABASE_URL loaded:", process.env.DATABASE_URL ? "YES" : "NO");
+// Environment check (only log in development)
+if (process.env.NODE_ENV !== 'production') {
+  console.log("JWT_SECRET loaded:", process.env.JWT_SECRET ? "YES" : "NO");
+  console.log("DATABASE_URL loaded:", process.env.DATABASE_URL ? "YES" : "NO");
+}
 
 const app = express();
 const httpServer = createServer(app);
@@ -37,38 +42,121 @@ const connectedUsers = new Map();
 // Store connected PC agents
 const connectedComputers = new Map();
 
+// Store discovered services via UDP broadcast (TightVNC service discovery)
+const discoveredServices = new Map();
+const SERVICE_DISCOVERY_PORT = 41234;
+const SERVICE_ANNOUNCEMENT_INTERVAL = 30000; // 30 seconds
+
+// UDP Service Discovery Listener
+const discoverySocket = dgram.createSocket('udp4');
+
+discoverySocket.on('error', (err) => {
+  console.error('[Discovery] UDP socket error:', err.message);
+});
+
+discoverySocket.on('message', (msg, rinfo) => {
+  try {
+    const data = JSON.parse(msg.toString());
+    
+    // Validate service announcement
+    if (data.type === 'tightvnc-announce' && data.computerId && data.ip && data.port) {
+      const serviceKey = `${data.ip}:${data.port}`;
+      const existingService = discoveredServices.get(serviceKey);
+      
+      // Only log new discoveries
+      if (!existingService) {
+        console.log(`[Discovery] New TightVNC service: ${data.hostname || data.computerId} at ${data.ip}:${data.port}`);
+      }
+      
+      // Update or add service
+      discoveredServices.set(serviceKey, {
+        computerId: data.computerId,
+        hostname: data.hostname || data.computerId,
+        ip: data.ip,
+        port: data.port,
+        hasAgent: data.hasAgent || false,
+        lastSeen: new Date(),
+        source: 'broadcast'
+      });
+      
+      // Broadcast to all connected clients via Socket.IO
+      io.emit('service_discovered', {
+        computerId: data.computerId,
+        hostname: data.hostname,
+        ip: data.ip,
+        port: data.port,
+        hasAgent: data.hasAgent,
+        source: 'broadcast'
+      });
+    }
+  } catch (err) {
+    // Ignore invalid messages
+  }
+});
+
+discoverySocket.on('listening', () => {
+  const address = discoverySocket.address();
+  console.log(`[Discovery] UDP service listener on ${address.address}:${address.port}`);
+  
+  // Enable broadcast
+  discoverySocket.setBroadcast(true);
+});
+
+// Start listening for service announcements
+discoverySocket.bind(SERVICE_DISCOVERY_PORT, () => {
+  discoverySocket.setBroadcast(true);
+});
+
+// Cleanup old services periodically
+setInterval(() => {
+  const now = new Date();
+  const timeout = 2 * 60 * 1000; // 2 minutes
+  
+  for (const [key, service] of discoveredServices.entries()) {
+    if (now - service.lastSeen > timeout) {
+      discoveredServices.delete(key);
+      io.emit('service_offline', {
+        computerId: service.computerId,
+        ip: service.ip
+      });
+    }
+  }
+}, 60000); // Run every minute
+
+// API endpoint to get discovered services
+app.get('/api/discovery/services', (req, res) => {
+  const services = Array.from(discoveredServices.values());
+  res.json({
+    services,
+    count: services.length,
+    timestamp: new Date()
+  });
+});
+
 // Socket.io authentication middleware
 io.use(async (socket, next) => {
-  console.log("Socket connection attempt received:", socket.id);
-  console.log("Socket handshake auth:", socket.handshake.auth);
   try {
     const token = socket.handshake.auth.token;
-    console.log("Token received:", token ? "Yes" : "No");
     if (!token) {
-      console.log("Rejecting socket - no token");
       return next(new Error("Authentication required"));
     }
 
     // Check if this is an agent connection
     if (token === 'agent-token-placeholder' || token.startsWith('agent-')) {
-      console.log("Agent connection accepted");
       socket.isAgent = true;
       return next();
     }
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    console.log("Token decoded, userId:", decoded.id);
     const user = await prisma.user.findUnique({
       where: { id: decoded.id },
       select: { id: true, username: true, fullName: true, role: true },
     });
 
     if (!user) {
-      console.log("Rejecting socket - user not found");
       return next(new Error("User not found"));
     }
 
-    console.log("Socket authenticated for user:", user.fullName);
     socket.user = user;
     next();
   } catch (error) {
@@ -81,11 +169,9 @@ io.use(async (socket, next) => {
 io.on("connection", (socket) => {
   // Handle agent connections differently from user connections
   if (socket.isAgent) {
-    console.log(`Agent connected: ${socket.id}`);
-    
     // PC Agent: Handle agent registration
     socket.on("agent_register", (computerData) => {
-      console.log(`PC Agent registered: ${computerData.name} (${computerData.ip})`);
+      console.log(`[Agent] Registered: ${computerData.name} (${computerData.ip})`);
       
       // Store computer connection
       connectedComputers.set(computerData.id, {
@@ -129,14 +215,42 @@ io.on("connection", (socket) => {
       }
     });
 
+    // PC Agent: Return command results back to requesting user
+    socket.on("command_result", (resultData) => {
+      const {
+        action,
+        success,
+        result,
+        error,
+        from
+      } = resultData || {};
+
+      let computerId = null;
+      for (const [id, computer] of connectedComputers.entries()) {
+        if (computer.socketId === socket.id) {
+          computerId = id;
+          break;
+        }
+      }
+
+      if (from) {
+        io.to(`user_${from}`).emit("agent_command_result", {
+          computerId,
+          action,
+          success,
+          result,
+          error,
+          timestamp: new Date()
+        });
+      }
+    });
+
     // Handle agent disconnection
     socket.on("disconnect", () => {
-      console.log(`Agent disconnected: ${socket.id}`);
-      
       // Find and remove the computer
       for (const [computerId, computer] of connectedComputers.entries()) {
         if (computer.socketId === socket.id) {
-          console.log(`PC Agent disconnected: ${computer.computer.name}`);
+          console.log(`[Agent] Disconnected: ${computer.computer.name}`);
           connectedComputers.delete(computerId);
           
           // Broadcast computer offline status
@@ -153,8 +267,10 @@ io.on("connection", (socket) => {
     return; // Skip user-specific handlers for agents
   }
 
-  // User connection handling
-  console.log(`User connected: ${socket.user.fullName} (${socket.user.id})`);
+  // User connection handling (only log in development)
+  if (process.env.NODE_ENV !== 'production') {
+    console.log(`[User] Connected: ${socket.user?.fullName} (${socket.user?.id})`);
+  }
 
   // Store user connection
   connectedUsers.set(socket.user.id, {
@@ -170,7 +286,10 @@ io.on("connection", (socket) => {
   socket.on("agent_command", (command) => {
     const { targetComputerId, action, params } = command;
     
-    console.log(`Command received: ${action} for computer ${targetComputerId}`);
+    // Command received (logging only in development)
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`[Command] ${action} for computer ${targetComputerId}`);
+    }
     
     // Forward command to the target computer's agent
     io.to(`computer_${targetComputerId}`).emit("execute_command", {

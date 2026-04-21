@@ -1,0 +1,16 @@
+{
+  "manually_added_pcs": [
+    {
+      "hostname": "OFFICE-PC-01",
+      "ip": "192.168.1.100",
+      "mac": "AA:BB:CC:DD:EE:01",
+      "connection_type": "Ethernet"
+    },
+    {
+      "hostname": "OFFICE-PC-02",
+      "ip": "192.168.1.101",
+      "mac": "AA:BB:CC:DD:EE:02",
+      "connection_type": "WiFi"
+    }
+  ]
+}

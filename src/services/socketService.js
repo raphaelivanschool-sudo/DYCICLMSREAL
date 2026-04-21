@@ -94,6 +94,30 @@ class SocketService {
       this.socket.on('group_created', (data) => {
         this.emit('group_created', data);
       });
+
+      // Listen for PC service discovery (TightVNC broadcast)
+      this.socket.on('service_discovered', (data) => {
+        this.emit('service_discovered', data);
+      });
+
+      // Listen for PC service going offline
+      this.socket.on('service_offline', (data) => {
+        this.emit('service_offline', data);
+      });
+
+      // Listen for computer online/offline via agent
+      this.socket.on('computer_online', (data) => {
+        this.emit('computer_online', data);
+      });
+
+      this.socket.on('computer_offline', (data) => {
+        this.emit('computer_offline', data);
+      });
+
+      // Listen for command results from PC agents
+      this.socket.on('agent_command_result', (data) => {
+        this.emit('agent_command_result', data);
+      });
       
       console.log('Socket listeners registered');
     } catch (error) {

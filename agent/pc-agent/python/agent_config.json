@@ -1,0 +1,13 @@
+{
+  "api_key": "sk_pc_agent_CHANGE_ME",
+  "port": 5555,
+  "host": "0.0.0.0",
+  "log_level": "INFO",
+  "screenshot_quality": 70,
+  "screenshot_max_width": 1920,
+  "screenshot_max_height": 1080,
+  "default_shutdown_delay": 30,
+  "enable_https": false,
+  "https_cert": null,
+  "https_key": null
+}

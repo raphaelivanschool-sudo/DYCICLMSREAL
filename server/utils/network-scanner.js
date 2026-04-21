@@ -19,16 +19,27 @@ class NetworkScanner {
       const interfaces = os.networkInterfaces();
       let localIP = null;
       let targetSubnet = null;
+      
+      // Virtual adapter patterns to avoid (VirtualBox, VMware, etc.)
+      const virtualPatterns = ['virtual', 'vmware', 'vbox', 'hyper-v', 'docker', 'nat', 'host-only'];
+      const isVirtualInterface = (name) => {
+        const lowerName = name.toLowerCase();
+        return virtualPatterns.some(pattern => lowerName.includes(pattern));
+      };
+      
+      // Known virtual subnets to avoid
+      const virtualSubnets = ['192.168.56', '192.168.99', '192.168.122'];
 
-      // First, look for the 192.168.0.x subnet (where test PC is located)
+      // First priority: look for 192.168.1.x (most common home/office LAN)
       for (const name of Object.keys(interfaces)) {
+        if (isVirtualInterface(name)) continue; // Skip virtual interfaces
         for (const iface of interfaces[name]) {
           if (iface.family === 'IPv4' && !iface.internal) {
             const ip = iface.address;
-            if (ip.startsWith('192.168.0.')) {
+            if (ip.startsWith('192.168.1.')) {
               localIP = ip;
-              targetSubnet = '192.168.0';
-              console.log(`Found target subnet: ${targetSubnet}.x`);
+              targetSubnet = '192.168.1';
+              console.log(`Found preferred subnet: ${targetSubnet}.x (${name})`);
               break;
             }
           }
@@ -36,18 +47,17 @@ class NetworkScanner {
         if (targetSubnet) break;
       }
 
-      // Second priority: look for any 192.168.x.x subnet (common LAN)
+      // Second priority: look for 192.168.0.x
       if (!targetSubnet) {
         for (const name of Object.keys(interfaces)) {
+          if (isVirtualInterface(name)) continue;
           for (const iface of interfaces[name]) {
             if (iface.family === 'IPv4' && !iface.internal) {
               const ip = iface.address;
-              if (ip.startsWith('192.168.')) {
+              if (ip.startsWith('192.168.0.')) {
                 localIP = ip;
-                targetSubnet = '192.168';
-                const parts = ip.split('.');
-                targetSubnet = `${parts[0]}.${parts[1]}.${parts[2]}`;
-                console.log(`Found 192.168 subnet: ${targetSubnet}.x`);
+                targetSubnet = '192.168.0';
+                console.log(`Found target subnet: ${targetSubnet}.x (${name})`);
                 break;
               }
             }
@@ -56,7 +66,53 @@ class NetworkScanner {
         }
       }
 
-      // If target subnet not found, use any non-internal IPv4 interface
+      // Third priority: look for any 192.168.x.x subnet (excluding known virtual subnets)
+      if (!targetSubnet) {
+        for (const name of Object.keys(interfaces)) {
+          if (isVirtualInterface(name)) continue;
+          for (const iface of interfaces[name]) {
+            if (iface.family === 'IPv4' && !iface.internal) {
+              const ip = iface.address;
+              if (ip.startsWith('192.168.')) {
+                const parts = ip.split('.');
+                const subnetPrefix = `${parts[0]}.${parts[1]}.${parts[2]}`;
+                // Skip known virtual subnets
+                if (virtualSubnets.includes(subnetPrefix)) {
+                  console.log(`Skipping virtual subnet: ${subnetPrefix}.x (${name})`);
+                  continue;
+                }
+                localIP = ip;
+                targetSubnet = subnetPrefix;
+                console.log(`Found 192.168 subnet: ${targetSubnet}.x (${name})`);
+                break;
+              }
+            }
+          }
+          if (targetSubnet) break;
+        }
+      }
+
+      // Fourth priority: look for 10.x.x.x or 172.16.x.x (corporate networks)
+      if (!targetSubnet) {
+        for (const name of Object.keys(interfaces)) {
+          if (isVirtualInterface(name)) continue;
+          for (const iface of interfaces[name]) {
+            if (iface.family === 'IPv4' && !iface.internal) {
+              const ip = iface.address;
+              if (ip.startsWith('10.') || ip.startsWith('172.16.')) {
+                localIP = ip;
+                const parts = localIP.split('.');
+                targetSubnet = `${parts[0]}.${parts[1]}.${parts[2]}`;
+                console.log(`Found corporate subnet: ${targetSubnet}.x (${name})`);
+                break;
+              }
+            }
+          }
+          if (targetSubnet) break;
+        }
+      }
+
+      // Last resort: use any non-internal IPv4 interface (including virtual)
       if (!targetSubnet) {
         for (const name of Object.keys(interfaces)) {
           for (const iface of interfaces[name]) {
@@ -64,6 +120,7 @@ class NetworkScanner {
               localIP = iface.address;
               const parts = localIP.split('.');
               targetSubnet = `${parts[0]}.${parts[1]}.${parts[2]}`;
+              console.log(`Fallback subnet: ${targetSubnet}.x (${name})`);
               break;
             }
           }
@@ -81,7 +138,7 @@ class NetworkScanner {
       return { subnet: targetSubnet, localIP };
     } catch (error) {
       console.error('Error getting network range:', error);
-      return { subnet: '192.168.100', localIP: '192.168.100.3' }; // fallback to target subnet
+      return { subnet: '192.168.1', localIP: '192.168.1.100' }; // fallback to most common subnet
     }
   }
 
@@ -292,7 +349,31 @@ class NetworkScanner {
     this.scanProgress = 0;
 
     try {
-      const { subnet, localIP } = await this.getLocalNetworkRange();
+      let subnet, localIP;
+      
+      // Use provided range or auto-detect
+      if (range && /^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(range)) {
+        subnet = range;
+        localIP = '0.0.0.0'; // Will be updated if we find matching interface
+        console.log(`Using custom subnet: ${subnet}.x`);
+        
+        // Try to find local IP in the same subnet
+        const interfaces = os.networkInterfaces();
+        for (const name of Object.keys(interfaces)) {
+          for (const iface of interfaces[name]) {
+            if (iface.family === 'IPv4' && !iface.internal && iface.address.startsWith(subnet)) {
+              localIP = iface.address;
+              console.log(`Found local IP in target subnet: ${localIP}`);
+              break;
+            }
+          }
+          if (localIP !== '0.0.0.0') break;
+        }
+      } else {
+        const detected = await this.getLocalNetworkRange();
+        subnet = detected.subnet;
+        localIP = detected.localIP;
+      }
       
       // Generate IP range (1-254 like Python version)
       const ips = [];
@@ -334,9 +415,16 @@ class NetworkScanner {
           const deviceType = this.identifyDeviceType(openPorts, device.ip);
           const os = this.detectOS(openPorts);
 
-          // Include all online devices that respond to ping
-          // (relaxed requirement - don't filter by ports)
-          if (deviceType === 'computer' || deviceType === 'server' || deviceType === 'unknown') {
+          // STRICT FILTER: Only include actual PCs/Computers
+          // Must have at least one PC-indicating port open:
+          // - VNC (5900), RDP (3389), SSH (22), SMB (445), WinRM (5985), Windows RPC (135/139)
+          const pcPorts = [5900, 3389, 22, 445, 5985, 135, 139];
+          const hasPCPort = openPorts.some(port => pcPorts.includes(port));
+          
+          // Only add if it's a computer/server type AND has PC ports open
+          const isComputerType = deviceType === 'computer' || deviceType === 'server';
+          
+          if (isComputerType && hasPCPort) {
             const pcData = {
               id: device.ip.replace(/\./g, '-'),
               name: device.hostname !== 'Unknown' ? device.hostname : `PC-${device.ip.split('.').pop().padStart(3, '0')}`,
@@ -361,6 +449,8 @@ class NetworkScanner {
             if (onDeviceFound) {
               onDeviceFound(pcData);
             }
+          } else if (openPorts.length > 0) {
+            console.log(`Skipping non-PC device ${device.ip} - Type: ${deviceType}, Ports: [${openPorts.join(', ')}]`);
           }
         } catch (error) {
           console.error(`Error getting details for ${device.ip}:`, error);

@@ -1,0 +1,356 @@
+from __future__ import annotations
+
+import base64
+import functools
+import io
+import json
+import logging
+import os
+import platform
+import subprocess
+import threading
+import time
+import traceback
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Callable, Dict, Optional, Tuple, TypeVar
+
+import psutil
+from flask import Flask, Response, jsonify, request
+from PIL import Image, ImageGrab
+
+
+AGENT_VERSION = "1.0"
+
+T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class AgentConfig:
+    api_key: str
+    port: int = 5555
+    host: str = "0.0.0.0"
+    log_level: str = "INFO"
+    screenshot_quality: int = 70
+    screenshot_max_width: int = 1920
+    screenshot_max_height: int = 1080
+    default_shutdown_delay: int = 30
+    enable_https: bool = False
+    https_cert: Optional[str] = None
+    https_key: Optional[str] = None
+
+
+def _now_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def load_config(config_path: Optional[str] = None) -> AgentConfig:
+    """
+    Load agent configuration from `agent_config.json` located alongside this file
+    (or from `config_path` if provided).
+    """
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    path = config_path or os.path.join(base_dir, "agent_config.json")
+
+    with open(path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+
+    return AgentConfig(
+        api_key=str(raw.get("api_key", "")),
+        port=int(raw.get("port", 5555)),
+        host=str(raw.get("host", "0.0.0.0")),
+        log_level=str(raw.get("log_level", "INFO")),
+        screenshot_quality=int(raw.get("screenshot_quality", 70)),
+        screenshot_max_width=int(raw.get("screenshot_max_width", 1920)),
+        screenshot_max_height=int(raw.get("screenshot_max_height", 1080)),
+        default_shutdown_delay=int(raw.get("default_shutdown_delay", 30)),
+        enable_https=bool(raw.get("enable_https", False)),
+        https_cert=raw.get("https_cert", None),
+        https_key=raw.get("https_key", None),
+    )
+
+
+def setup_logging(log_level: str) -> logging.Logger:
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    log_path = os.path.join(base_dir, "agent.log")
+
+    logger = logging.getLogger("pc_agent")
+    logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
+    logger.handlers.clear()
+    logger.propagate = False
+
+    formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s", "%Y-%m-%d %H:%M:%S")
+
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    file_handler.setLevel(logger.level)
+    logger.addHandler(file_handler)
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    stream_handler.setLevel(logger.level)
+    logger.addHandler(stream_handler)
+
+    return logger
+
+
+def _unauthorized() -> Tuple[Response, int]:
+    return jsonify({"error": "Unauthorized"}), 401
+
+
+def require_auth(config: AgentConfig) -> Callable[[Callable[..., T]], Callable[..., T]]:
+    """
+    Flask decorator enforcing `Authorization: Bearer {TOKEN}`.
+    """
+
+    def decorator(fn: Callable[..., T]) -> Callable[..., T]:
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            auth = request.headers.get("Authorization", "")
+            expected = f"Bearer {config.api_key}"
+            if not auth or auth.strip() != expected:
+                return _unauthorized()
+            return fn(*args, **kwargs)
+
+        return wrapper  # type: ignore[return-value]
+
+    return decorator
+
+
+def _get_os_string() -> str:
+    if platform.system().lower().startswith("win"):
+        ver = platform.win32_ver()
+        if ver and ver[0]:
+            return f"{ver[0]} {ver[1]}".strip()
+        return "Windows"
+    return platform.platform()
+
+
+def _disk_percent() -> float:
+    try:
+        usage = psutil.disk_usage(os.path.abspath(os.sep))
+        return float(usage.percent)
+    except Exception:
+        return 0.0
+
+
+def _uptime_seconds() -> int:
+    try:
+        return int(time.time() - psutil.boot_time())
+    except Exception:
+        return 0
+
+
+def _resize_to_fit(img: Image.Image, max_w: int, max_h: int) -> Image.Image:
+    if max_w <= 0 or max_h <= 0:
+        return img
+    w, h = img.size
+    if w <= max_w and h <= max_h:
+        return img
+    scale = min(max_w / float(w), max_h / float(h))
+    new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+    return img.resize(new_size, Image.Resampling.LANCZOS)
+
+
+def capture_screenshot_jpeg(
+    quality: int,
+    max_w: int,
+    max_h: int,
+    timeout_seconds: float = 5.0,
+) -> Dict[str, Any]:
+    """
+    Capture a screenshot of all monitors and return metadata + base64 JPEG.
+    Uses a background thread to enforce a hard timeout.
+    """
+    result: Dict[str, Any] = {}
+    error: Dict[str, str] = {}
+
+    def _work() -> None:
+        try:
+            img = ImageGrab.grab(all_screens=True)
+            img = img.convert("RGB")
+            img = _resize_to_fit(img, max_w=max_w, max_h=max_h)
+            buf = io.BytesIO()
+            q = max(1, min(int(quality), 95))
+            img.save(buf, format="JPEG", quality=q, optimize=True)
+            b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            result.update(
+                {
+                    "screenshot": b64,
+                    "format": "jpeg",
+                    "quality": q,
+                    "width": int(img.size[0]),
+                    "height": int(img.size[1]),
+                    "timestamp": _now_str(),
+                }
+            )
+        except Exception as e:
+            error["message"] = str(e)
+            error["traceback"] = traceback.format_exc()
+
+    t = threading.Thread(target=_work, daemon=True)
+    t.start()
+    t.join(timeout=timeout_seconds)
+
+    if t.is_alive():
+        raise TimeoutError("Screenshot capture timed out after 5 seconds")
+    if error:
+        raise RuntimeError(error["message"])
+    return result
+
+
+def _run_windows_command(args: list[str], timeout_seconds: float = 10.0) -> None:
+    subprocess.run(args, check=True, capture_output=True, text=True, timeout=timeout_seconds)
+
+
+def lock_windows() -> None:
+    _run_windows_command(["rundll32.exe", "user32.dll,LockWorkStation"], timeout_seconds=5.0)
+
+
+def shutdown_windows(delay: int, reason: str) -> None:
+    delay_s = max(0, int(delay))
+    safe_reason = (reason or "").replace('"', "'")
+    _run_windows_command(["shutdown", "/s", "/t", str(delay_s), "/c", safe_reason], timeout_seconds=5.0)
+
+
+def cancel_shutdown_windows() -> None:
+    _run_windows_command(["shutdown", "/a"], timeout_seconds=5.0)
+
+
+def create_app(config: AgentConfig, logger: logging.Logger) -> Flask:
+    app = Flask(__name__)
+    auth_required = require_auth(config)
+
+    @app.before_request
+    def _log_request() -> None:
+        try:
+            ip = request.headers.get("X-Forwarded-For", request.remote_addr) or "unknown"
+            logger.info("request ip=%s method=%s path=%s", ip, request.method, request.path)
+        except Exception:
+            # Avoid failing requests due to logging
+            pass
+
+    @app.errorhandler(Exception)
+    def _handle_unexpected_error(err: Exception) -> Tuple[Response, int]:
+        logger.error("Unhandled error: %s\n%s", err, traceback.format_exc())
+        return jsonify({"error": "Internal server error"}), 500
+
+    @app.get("/status")
+    @auth_required
+    def status() -> Tuple[Response, int]:
+        try:
+            hostname = platform.node()
+            cpu = float(psutil.cpu_percent(interval=0.1))
+            mem = float(psutil.virtual_memory().percent)
+            disk = _disk_percent()
+            uptime = _uptime_seconds()
+            payload = {
+                "status": "online",
+                "hostname": hostname,
+                "os": _get_os_string(),
+                "cpu_percent": cpu,
+                "memory_percent": mem,
+                "disk_percent": disk,
+                "uptime_seconds": uptime,
+                "agent_version": AGENT_VERSION,
+            }
+            return jsonify(payload), 200
+        except Exception as e:
+            logger.error("status failed: %s\n%s", e, traceback.format_exc())
+            return jsonify({"error": "Failed to get status"}), 500
+
+    @app.get("/screenshot")
+    @auth_required
+    def screenshot() -> Tuple[Response, int]:
+        try:
+            payload = capture_screenshot_jpeg(
+                quality=config.screenshot_quality,
+                max_w=config.screenshot_max_width,
+                max_h=config.screenshot_max_height,
+                timeout_seconds=5.0,
+            )
+            logger.info("screenshot captured ts=%s", payload.get("timestamp"))
+            return jsonify(payload), 200
+        except Exception as e:
+            logger.error("screenshot failed: %s\n%s", e, traceback.format_exc())
+            return jsonify({"error": "Screenshot capture failed"}), 500
+
+    @app.post("/lock")
+    @auth_required
+    def lock() -> Tuple[Response, int]:
+        try:
+            lock_windows()
+            ts = _now_str()
+            logger.info("lock action completed ts=%s", ts)
+            return jsonify({"status": "success", "action": "locked", "timestamp": ts}), 200
+        except Exception as e:
+            logger.error("lock failed: %s\n%s", e, traceback.format_exc())
+            return jsonify({"error": "Failed to lock PC"}), 500
+
+    @app.post("/shutdown")
+    @auth_required
+    def shutdown() -> Tuple[Response, int]:
+        try:
+            body: Dict[str, Any] = {}
+            if request.data:
+                try:
+                    body = request.get_json(force=True, silent=False) or {}
+                except Exception:
+                    return jsonify({"error": "Invalid JSON"}), 400
+
+            delay = int(body.get("delay", config.default_shutdown_delay))
+            reason = str(body.get("reason", "Controlled shutdown"))
+            shutdown_windows(delay=delay, reason=reason)
+            ts = _now_str()
+            logger.info("shutdown initiated delay=%s ts=%s", delay, ts)
+            return (
+                jsonify({"status": "success", "action": "shutdown_initiated", "delay_seconds": delay, "timestamp": ts}),
+                200,
+            )
+        except Exception as e:
+            logger.error("shutdown failed: %s\n%s", e, traceback.format_exc())
+            return jsonify({"error": "Failed to initiate shutdown"}), 500
+
+    @app.post("/cancel_shutdown")
+    @auth_required
+    def cancel_shutdown() -> Tuple[Response, int]:
+        try:
+            cancel_shutdown_windows()
+            ts = _now_str()
+            logger.info("shutdown cancelled ts=%s", ts)
+            return jsonify({"status": "success", "action": "shutdown_cancelled", "timestamp": ts}), 200
+        except subprocess.CalledProcessError as e:
+            # `shutdown /a` may return non-zero if no shutdown was scheduled.
+            logger.error("cancel shutdown failed: %s\n%s", e, traceback.format_exc())
+            return jsonify({"error": "No shutdown to cancel"}), 500
+        except Exception as e:
+            logger.error("cancel shutdown failed: %s\n%s", e, traceback.format_exc())
+            return jsonify({"error": "No shutdown to cancel"}), 500
+
+    return app
+
+
+def main() -> int:
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(base_dir, "agent_config.json")
+
+    config = load_config(config_path)
+    logger = setup_logging(config.log_level)
+
+    logger.info("Agent starting version=%s host=%s port=%s", AGENT_VERSION, config.host, config.port)
+
+    ssl_context = None
+    if config.enable_https:
+        if not config.https_cert or not config.https_key:
+            logger.error("HTTPS enabled but https_cert/https_key not configured")
+            return 2
+        ssl_context = (config.https_cert, config.https_key)
+
+    app = create_app(config=config, logger=logger)
+    app.run(host=config.host, port=config.port, threaded=True, ssl_context=ssl_context)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+

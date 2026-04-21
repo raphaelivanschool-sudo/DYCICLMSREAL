@@ -17,6 +17,7 @@ import SecuritySettings from "./pages/admin/SecuritySettings";
 import SystemLogs from "./pages/admin/SystemLogs";
 import Tickets from "./pages/admin/Tickets";
 import HardwareInventory from "./pages/admin/HardwareInventory";
+import DeveloperModePage from "./pages/admin/DeveloperModePage";
 
 // Instructor imports
 import InstructorLayout from "./components/layout/InstructorLayout";
@@ -66,6 +67,7 @@ function App() {
           <Route path="logs" element={<SystemLogs />} />
           <Route path="tickets" element={<Tickets />} />
           <Route path="hardware-inventory" element={<HardwareInventory />} />
+          <Route path="developer" element={<DeveloperModePage />} />
           <Route path="grading" element={<GradingPanel />} />
           <Route path="agent-control" element={<AgentControlPage />} />
         </Route>
