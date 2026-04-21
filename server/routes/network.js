@@ -1,6 +1,7 @@
 import express from 'express';
 import rateLimit from 'express-rate-limit';
 import NetworkScanner from '../utils/network-scanner.js';
+import os from 'os';
 
 const router = express.Router();
 
@@ -19,6 +20,22 @@ const networkScanner = new NetworkScanner();
 
 // Store active scan connections (for WebSocket updates)
 const activeScans = new Map();
+
+function getActiveSubnets() {
+  const interfaces = os.networkInterfaces();
+  const subnets = new Set();
+  for (const name of Object.keys(interfaces)) {
+    for (const iface of interfaces[name] || []) {
+      if (iface.family === 'IPv4' && !iface.internal && iface.address) {
+        const parts = iface.address.split('.');
+        if (parts.length === 4) {
+          subnets.add(`${parts[0]}.${parts[1]}.${parts[2]}`);
+        }
+      }
+    }
+  }
+  return Array.from(subnets);
+}
 
 // Start network scan
 router.post('/scan', scanLimiter, async (req, res) => {
@@ -87,6 +104,96 @@ router.post('/scan', scanLimiter, async (req, res) => {
     console.error('Error starting network scan:', error);
     res.status(500).json({
       error: 'Failed to start network scan',
+      details: error.message
+    });
+  }
+});
+
+// Start server-local multi-subnet scan (no agent required)
+router.post('/server-scan', scanLimiter, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    if (activeScans.has(userId)) {
+      return res.status(400).json({
+        error: 'You already have an active scan in progress'
+      });
+    }
+
+    const subnets = getActiveSubnets();
+    if (subnets.length === 0) {
+      return res.status(400).json({
+        error: 'No active IPv4 network interfaces found on the server'
+      });
+    }
+
+    const io = req.app.get('io');
+
+    const scanPromise = (async () => {
+      let totalDevicesFound = 0;
+
+      for (let i = 0; i < subnets.length; i++) {
+        const subnet = subnets[i];
+
+        await networkScanner.scanNetwork(
+          subnet,
+          (progress, devicesFound) => {
+            totalDevicesFound = Math.max(totalDevicesFound, devicesFound);
+            const overallProgress = Math.round(((i + (progress / 100)) / subnets.length) * 100);
+            if (io) {
+              io.to(`user_${userId}`).emit('scan_progress', {
+                progress: overallProgress,
+                devicesFound: totalDevicesFound,
+                subnet: `${subnet}.0/24`,
+                userId
+              });
+            }
+          },
+          (device) => {
+            const connectedComputers = req.app.get('connectedComputers');
+
+            if (connectedComputers) {
+              for (const computerData of connectedComputers.values()) {
+                if (computerData.computer.ip === device.ip) {
+                  return;
+                }
+              }
+            }
+
+            if (io) {
+              io.to(`user_${userId}`).emit('device_found', {
+                device,
+                subnet: `${subnet}.0/24`,
+                userId
+              });
+            }
+          }
+        );
+      }
+
+      if (io) {
+        io.to(`user_${userId}`).emit('scan_complete', {
+          count: networkScanner.getDiscoveredDevices().length,
+          subnets: subnets.map((s) => `${s}.0/24`),
+          userId
+        });
+      }
+    })();
+
+    activeScans.set(userId, scanPromise);
+    scanPromise.finally(() => {
+      activeScans.delete(userId);
+    });
+
+    res.json({
+      message: 'Server subnet scan started',
+      subnets: subnets.map((s) => `${s}.0/24`),
+      scanId: userId
+    });
+  } catch (error) {
+    console.error('Error starting server scan:', error);
+    res.status(500).json({
+      error: 'Failed to start server scan',
       details: error.message
     });
   }

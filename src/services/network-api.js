@@ -27,6 +27,16 @@ const networkApi = {
     }
   },
 
+  // Start server-local scan across active subnets
+  async startServerScan() {
+    try {
+      const response = await apiClient.post('/api/network/server-scan', {});
+      return response.data;
+    } catch (error) {
+      throw new Error(error.response?.data?.error || 'Failed to start server scan');
+    }
+  },
+
   // Get scan status
   async getScanStatus() {
     try {

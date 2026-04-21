@@ -1,47 +1,23 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Monitor, RefreshCw, Search, AlertCircle } from 'lucide-react';
-import { agentsApi } from '../../services/api.js';
+import { Monitor, RefreshCw, Search, AlertCircle, Radio } from 'lucide-react';
+import networkApi from '../../services/network-api.js';
 import socketService from '../../services/socketService.js';
 
 const RESULT_TIMEOUT_MS = 90000;
 
 function DeveloperModePage() {
-  const [agents, setAgents] = useState([]);
-  const [selectedAgentId, setSelectedAgentId] = useState('');
-  const [loadingAgents, setLoadingAgents] = useState(false);
   const [discovering, setDiscovering] = useState(false);
   const [discoveryError, setDiscoveryError] = useState('');
-  const [results, setResults] = useState([]);
+  const [resultsByIp, setResultsByIp] = useState({});
   const [lastRunAt, setLastRunAt] = useState(null);
   const [scannerWarnings, setScannerWarnings] = useState([]);
+  const [scanProgress, setScanProgress] = useState(null);
 
-  const selectedAgent = useMemo(
-    () => agents.find((agent) => agent.id === selectedAgentId),
-    [agents, selectedAgentId]
-  );
-
-  const loadAgents = async () => {
-    try {
-      setLoadingAgents(true);
-      const response = await agentsApi.getConnected();
-      const devices = response.data?.devices || [];
-      setAgents(devices);
-
-      if (devices.length > 0 && !selectedAgentId) {
-        setSelectedAgentId(devices[0].id);
-      } else if (devices.length > 0 && selectedAgentId && !devices.find((d) => d.id === selectedAgentId)) {
-        setSelectedAgentId(devices[0].id);
-      }
-    } catch (error) {
-      setDiscoveryError('Failed to load connected agents.');
-    } finally {
-      setLoadingAgents(false);
-    }
-  };
-
-  useEffect(() => {
-    loadAgents();
-  }, []);
+  const results = useMemo(() => {
+    const items = Object.values(resultsByIp);
+    items.sort((a, b) => (a.ip || '').localeCompare(b.ip || ''));
+    return items;
+  }, [resultsByIp]);
 
   useEffect(() => {
     if (!socketService.connected()) {
@@ -50,51 +26,80 @@ function DeveloperModePage() {
   }, []);
 
   const runDiscovery = async () => {
-    if (!selectedAgentId) {
-      setDiscoveryError('Select an agent first.');
-      return;
-    }
-
     setDiscovering(true);
     setDiscoveryError('');
     setScannerWarnings([]);
-    setResults([]);
+    setResultsByIp({});
+    setScanProgress(null);
 
     let timeoutId;
     let unsubscribe;
+    let unsubscribeProgress;
+    let unsubscribeComplete;
+    let unsubscribeBroadcast;
 
     try {
       const resultPromise = new Promise((resolve, reject) => {
-        unsubscribe = socketService.on('agent_command_result', (event) => {
-          if (event?.computerId !== selectedAgentId || event?.action !== 'discover-peers') {
-            return;
-          }
-          resolve(event);
-        });
+        unsubscribe = socketService.on('device_found', (event) => resolve(event));
 
         timeoutId = setTimeout(() => {
           reject(new Error('Timed out waiting for agent discovery result.'));
         }, RESULT_TIMEOUT_MS);
       });
 
-      await agentsApi.sendCommand(selectedAgentId, 'discover-peers', {});
+      unsubscribeProgress = socketService.on('scan_progress', (evt) => {
+        if (typeof evt?.progress === 'number') setScanProgress(evt.progress);
+      });
+
+      unsubscribeComplete = socketService.on('scan_complete', () => {
+        setLastRunAt(new Date());
+        setDiscovering(false);
+      });
+
+      unsubscribeBroadcast = socketService.on('service_discovered', (data) => {
+        if (!data?.ip) return;
+        setResultsByIp((prev) => ({
+          ...prev,
+          [data.ip]: {
+            hostname: data.hostname || 'Unknown',
+            ip: data.ip,
+            mac: '',
+            status: 'online',
+            connection_type: 'unknown',
+            source: 'broadcast'
+          }
+        }));
+      });
+
+      await networkApi.startServerScan();
       const event = await resultPromise;
 
-      const payload = event?.result || {};
-      const discovered = Array.isArray(payload.discovered) ? payload.discovered : [];
-      const warnings = Array.isArray(payload.warnings) ? payload.warnings : [];
-
-      setResults(discovered);
-      setScannerWarnings(warnings);
-      setLastRunAt(new Date());
-      if (event?.success === false) {
-        setDiscoveryError(event.error || payload.error || 'Discovery failed on the agent.');
+      if (event?.device?.ip) {
+        setResultsByIp((prev) => {
+          const ip = event.device.ip;
+          const existing = prev[ip] || {};
+          return {
+            ...prev,
+            [ip]: {
+              ...existing,
+              hostname: event.device.hostname || existing.hostname || event.device.name || 'Unknown',
+              ip,
+              mac: event.device.mac || existing.mac || '',
+              status: event.device.status || existing.status || 'online',
+              connection_type: existing.connection_type || 'unknown',
+              source: existing.source === 'broadcast' ? 'broadcast+scan' : 'scan'
+            }
+          };
+        });
       }
     } catch (error) {
       setDiscoveryError(error.message || 'Failed to run discovery.');
     } finally {
       if (timeoutId) clearTimeout(timeoutId);
       if (unsubscribe) unsubscribe();
+      if (unsubscribeProgress) unsubscribeProgress();
+      if (unsubscribeComplete) unsubscribeComplete();
+      if (unsubscribeBroadcast) unsubscribeBroadcast();
       setDiscovering(false);
     }
   };
@@ -112,49 +117,18 @@ function DeveloperModePage() {
 
         <div className="p-6 space-y-5">
           <div className="flex flex-wrap gap-3 items-end">
-            <div className="min-w-[260px]">
-              <label className="block text-sm font-medium text-gray-700 mb-1">Target agent</label>
-              <select
-                value={selectedAgentId}
-                onChange={(e) => setSelectedAgentId(e.target.value)}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                disabled={loadingAgents || discovering}
-              >
-                {agents.length === 0 ? (
-                  <option value="">No connected agents</option>
-                ) : (
-                  agents.map((agent) => (
-                    <option key={agent.id} value={agent.id}>
-                      {agent.name || agent.hostname || agent.id} ({agent.ip})
-                    </option>
-                  ))
-                )}
-              </select>
-            </div>
-
-            <button
-              onClick={loadAgents}
-              disabled={loadingAgents || discovering}
-              className="flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg text-sm bg-white hover:bg-gray-50 disabled:opacity-50"
-            >
-              <RefreshCw className={`w-4 h-4 ${loadingAgents ? 'animate-spin' : ''}`} />
-              Refresh Agents
-            </button>
-
             <button
               onClick={runDiscovery}
-              disabled={discovering || !selectedAgentId}
+              disabled={discovering}
               className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
             >
               <Search className="w-4 h-4" />
-              {discovering ? 'Discovering...' : 'Discover now'}
+              {discovering ? 'Scanning server network...' : 'Scan Server Network'}
             </button>
           </div>
 
-          {selectedAgent && (
-            <p className="text-sm text-gray-500">
-              Selected: <span className="font-medium text-gray-700">{selectedAgent.name || selectedAgent.hostname}</span> ({selectedAgent.ip})
-            </p>
+          {typeof scanProgress === 'number' && (
+            <p className="text-sm text-gray-500">Scan progress: {scanProgress}%</p>
           )}
 
           {lastRunAt && (
@@ -179,7 +153,7 @@ function DeveloperModePage() {
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
         <div className="px-6 py-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold text-gray-900">PC Discovery (Python)</h2>
-          <p className="text-sm text-gray-500">Result shape: hostname, ip, mac, status, connection_type</p>
+          <p className="text-sm text-gray-500">Hybrid sources: server scan + UDP broadcast</p>
         </div>
 
         <div className="overflow-x-auto">
@@ -191,13 +165,14 @@ function DeveloperModePage() {
                 <th className="text-left px-4 py-3 font-medium text-gray-600">MAC</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Status</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Connection</th>
+                <th className="text-left px-4 py-3 font-medium text-gray-600">Source</th>
               </tr>
             </thead>
             <tbody>
               {results.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="px-4 py-6 text-center text-gray-500">
-                    {discovering ? 'Running discovery...' : 'No results yet. Select an agent and click Discover now.'}
+                  <td colSpan={6} className="px-4 py-6 text-center text-gray-500">
+                    {discovering ? 'Running server scan...' : 'No results yet. Click “Scan Server Network”.'}
                   </td>
                 </tr>
               ) : (
@@ -208,6 +183,10 @@ function DeveloperModePage() {
                     <td className="px-4 py-3 text-gray-700">{device.mac || '-'}</td>
                     <td className="px-4 py-3 text-gray-700">{device.status || 'unknown'}</td>
                     <td className="px-4 py-3 text-gray-700">{device.connection_type || 'unknown'}</td>
+                    <td className="px-4 py-3 text-gray-700 flex items-center gap-2">
+                      {device.source?.includes('broadcast') && <Radio className="w-4 h-4 text-purple-600" />}
+                      {device.source || 'unknown'}
+                    </td>
                   </tr>
                 ))
               )}

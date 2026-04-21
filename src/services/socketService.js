@@ -118,6 +118,19 @@ class SocketService {
       this.socket.on('agent_command_result', (data) => {
         this.emit('agent_command_result', data);
       });
+
+      // Listen for server-side scan events
+      this.socket.on('scan_progress', (data) => {
+        this.emit('scan_progress', data);
+      });
+
+      this.socket.on('device_found', (data) => {
+        this.emit('device_found', data);
+      });
+
+      this.socket.on('scan_complete', (data) => {
+        this.emit('scan_complete', data);
+      });
       
       console.log('Socket listeners registered');
     } catch (error) {
