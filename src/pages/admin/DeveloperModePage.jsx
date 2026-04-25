@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Monitor, RefreshCw, Search, AlertCircle, Radio } from 'lucide-react';
+import { Monitor, Search, AlertCircle, Radio, Lock, Loader2 } from 'lucide-react';
 import networkApi from '../../services/network-api.js';
+import { agentsApi } from '../../services/api.js';
 import socketService from '../../services/socketService.js';
 
 const RESULT_TIMEOUT_MS = 90000;
@@ -12,6 +13,9 @@ function DeveloperModePage() {
   const [lastRunAt, setLastRunAt] = useState(null);
   const [scannerWarnings, setScannerWarnings] = useState([]);
   const [scanProgress, setScanProgress] = useState(null);
+  const [agentByIp, setAgentByIp] = useState({});
+  const [lockingByIp, setLockingByIp] = useState({});
+  const [toast, setToast] = useState(null);
 
   const results = useMemo(() => {
     const items = Object.values(resultsByIp);
@@ -23,7 +27,77 @@ function DeveloperModePage() {
     if (!socketService.connected()) {
       socketService.connect();
     }
+    loadConnectedAgents();
   }, []);
+
+  const showToast = (message, type = 'success') => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 3000);
+  };
+
+  const mergeAgentRows = (devices = []) => {
+    setResultsByIp((prev) => {
+      const next = { ...prev };
+      devices.forEach((device) => {
+        if (!device?.ip) return;
+        const existing = next[device.ip] || {};
+        next[device.ip] = {
+          ...existing,
+          hostname: existing.hostname || device.name || device.hostname || 'Unknown',
+          ip: device.ip,
+          mac: existing.mac || device.mac || '',
+          status: existing.status || device.status || 'online',
+          connection_type: existing.connection_type || 'agent',
+          source: existing.source
+            ? (existing.source.includes('agent') ? existing.source : `${existing.source}+agent`)
+            : 'agent'
+        };
+      });
+      return next;
+    });
+  };
+
+  const loadConnectedAgents = async (mergeIntoTable = true) => {
+    try {
+      const response = await agentsApi.getConnected();
+      const devices = response.data?.devices || [];
+      const byIp = {};
+      devices.forEach((device) => {
+        if (device?.ip && device?.id) {
+          byIp[device.ip] = device;
+        }
+      });
+      setAgentByIp(byIp);
+      if (mergeIntoTable) {
+        mergeAgentRows(devices);
+      }
+    } catch (error) {
+      // Do not block discovery screen if agent list fails.
+      console.error('Failed to load connected agents:', error);
+    }
+  };
+
+  const handleLockDevice = async (device) => {
+    if (!device?.ip) return;
+
+    const linkedAgent = agentByIp[device.ip];
+    if (!linkedAgent?.id) {
+      showToast(`No connected agent found for ${device.ip}. Start DYCI PC agent on that machine.`, 'error');
+      return;
+    }
+
+    const ipKey = device.ip;
+    setLockingByIp((prev) => ({ ...prev, [ipKey]: true }));
+    try {
+      await agentsApi.sendCommand(linkedAgent.id, 'lock');
+      showToast(`Lock command sent to ${device.hostname || linkedAgent.name || device.ip}`);
+    } catch (error) {
+      console.error('Failed to lock device:', error);
+      showToast(error.response?.data?.error || 'Failed to send lock command', 'error');
+    } finally {
+      setLockingByIp((prev) => ({ ...prev, [ipKey]: false }));
+    }
+  };
 
   const runDiscovery = async () => {
     setDiscovering(true);
@@ -33,27 +107,47 @@ function DeveloperModePage() {
     setScanProgress(null);
 
     let timeoutId;
-    let unsubscribe;
     let unsubscribeProgress;
     let unsubscribeComplete;
+    let unsubscribeFound;
     let unsubscribeBroadcast;
 
     try {
-      const resultPromise = new Promise((resolve, reject) => {
-        unsubscribe = socketService.on('device_found', (event) => resolve(event));
-
+      const completePromise = new Promise((resolve, reject) => {
         timeoutId = setTimeout(() => {
-          reject(new Error('Timed out waiting for agent discovery result.'));
+          reject(new Error('Timed out waiting for scan to complete.'));
         }, RESULT_TIMEOUT_MS);
+
+        unsubscribeComplete = socketService.on('scan_complete', () => {
+          setLastRunAt(new Date());
+          setDiscovering(false);
+          resolve();
+        });
       });
 
       unsubscribeProgress = socketService.on('scan_progress', (evt) => {
         if (typeof evt?.progress === 'number') setScanProgress(evt.progress);
       });
 
-      unsubscribeComplete = socketService.on('scan_complete', () => {
-        setLastRunAt(new Date());
-        setDiscovering(false);
+      unsubscribeFound = socketService.on('device_found', (event) => {
+        const device = event?.device;
+        if (!device?.ip) return;
+        setResultsByIp((prev) => {
+          const ip = device.ip;
+          const existing = prev[ip] || {};
+          return {
+            ...prev,
+            [ip]: {
+              ...existing,
+              hostname: device.hostname || existing.hostname || device.name || 'Unknown',
+              ip,
+              mac: device.mac || existing.mac || '',
+              status: device.status || existing.status || 'online',
+              connection_type: existing.connection_type || 'unknown',
+              source: existing.source === 'broadcast' ? 'broadcast+scan' : (existing.source || 'scan')
+            }
+          };
+        });
       });
 
       unsubscribeBroadcast = socketService.on('service_discovered', (data) => {
@@ -72,34 +166,37 @@ function DeveloperModePage() {
       });
 
       await networkApi.startServerScan();
-      const event = await resultPromise;
+      await completePromise;
 
-      if (event?.device?.ip) {
-        setResultsByIp((prev) => {
-          const ip = event.device.ip;
-          const existing = prev[ip] || {};
-          return {
-            ...prev,
-            [ip]: {
-              ...existing,
-              hostname: event.device.hostname || existing.hostname || event.device.name || 'Unknown',
-              ip,
-              mac: event.device.mac || existing.mac || '',
-              status: event.device.status || existing.status || 'online',
-              connection_type: existing.connection_type || 'unknown',
-              source: existing.source === 'broadcast' ? 'broadcast+scan' : 'scan'
-            }
+      // Backfill from REST endpoint so rows still appear even if socket events were missed.
+      const discovered = await networkApi.getDiscoveredDevices();
+      const scannedDevices = discovered?.devices || [];
+      setResultsByIp((prev) => {
+        const next = { ...prev };
+        scannedDevices.forEach((device) => {
+          if (!device?.ip) return;
+          const existing = next[device.ip] || {};
+          next[device.ip] = {
+            ...existing,
+            hostname: device.hostname || existing.hostname || device.name || 'Unknown',
+            ip: device.ip,
+            mac: device.mac || existing.mac || '',
+            status: device.status || existing.status || 'online',
+            connection_type: existing.connection_type || 'unknown',
+            source: existing.source === 'broadcast' ? 'broadcast+scan' : (existing.source || 'scan')
           };
         });
-      }
+        return next;
+      });
     } catch (error) {
       setDiscoveryError(error.message || 'Failed to run discovery.');
     } finally {
       if (timeoutId) clearTimeout(timeoutId);
-      if (unsubscribe) unsubscribe();
       if (unsubscribeProgress) unsubscribeProgress();
       if (unsubscribeComplete) unsubscribeComplete();
+      if (unsubscribeFound) unsubscribeFound();
       if (unsubscribeBroadcast) unsubscribeBroadcast();
+      await loadConnectedAgents(true);
       setDiscovering(false);
     }
   };
@@ -166,12 +263,13 @@ function DeveloperModePage() {
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Status</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Connection</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Source</th>
+                <th className="text-left px-4 py-3 font-medium text-gray-600">Lock</th>
               </tr>
             </thead>
             <tbody>
               {results.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-6 text-center text-gray-500">
+                  <td colSpan={7} className="px-4 py-6 text-center text-gray-500">
                     {discovering ? 'Running server scan...' : 'No results yet. Click “Scan Server Network”.'}
                   </td>
                 </tr>
@@ -187,6 +285,29 @@ function DeveloperModePage() {
                       {device.source?.includes('broadcast') && <Radio className="w-4 h-4 text-purple-600" />}
                       {device.source || 'unknown'}
                     </td>
+                    <td className="px-4 py-3">
+                      <button
+                        onClick={() => handleLockDevice(device)}
+                        disabled={!agentByIp[device.ip] || lockingByIp[device.ip]}
+                        title={
+                          agentByIp[device.ip]
+                            ? `Lock ${device.hostname || device.ip}`
+                            : 'Agent not connected for this IP'
+                        }
+                        className={`inline-flex items-center gap-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                          agentByIp[device.ip]
+                            ? 'bg-amber-500 text-white hover:bg-amber-600'
+                            : 'bg-gray-200 text-gray-500 cursor-not-allowed'
+                        }`}
+                      >
+                        {lockingByIp[device.ip] ? (
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <Lock className="w-3 h-3" />
+                        )}
+                        Lock
+                      </button>
+                    </td>
                   </tr>
                 ))
               )}
@@ -194,6 +315,16 @@ function DeveloperModePage() {
           </table>
         </div>
       </div>
+
+      {toast && (
+        <div
+          className={`fixed bottom-4 right-4 z-50 rounded-lg px-4 py-2 text-sm font-medium shadow-lg ${
+            toast.type === 'success' ? 'bg-gray-900 text-white' : 'bg-red-600 text-white'
+          }`}
+        >
+          {toast.message}
+        </div>
+      )}
     </div>
   );
 }
