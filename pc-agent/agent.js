@@ -2,7 +2,7 @@ const io = require('socket.io-client');
 const si = require('systeminformation');
 const os = require('os');
 const { exec } = require('child_process');
-const path = require('path');
+const fs = require('fs').promises;
 
 // Configuration
 const CONFIG = {
@@ -20,6 +20,9 @@ let reconnectAttempts = 0;
 let heartbeatTimer = null;
 let statusUpdateTimer = null;
 let isRegistered = false;
+const HOSTS_PATH = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
+const BLOCK_START_MARKER = '# DYCICLMS_WEBSITE_BLOCK_START';
+const BLOCK_END_MARKER = '# DYCICLMS_WEBSITE_BLOCK_END';
 
 // Get computer information
 async function getComputerInfo() {
@@ -33,8 +36,9 @@ async function getComputerInfo() {
       si.graphics()
     ]);
 
-    // Get IP address - prioritize 192.168.0.x LAN subnet
+    // Get IP/MAC address - prioritize 192.168.0.x LAN subnet
     let ipAddress = '127.0.0.1';
+    let selectedInterface = null;
     const allInterfaces = Object.values(network).flat();
     
     // First priority: 192.168.0.x (where test PC should be)
@@ -45,6 +49,7 @@ async function getComputerInfo() {
     );
     
     if (lanInterface) {
+      selectedInterface = lanInterface;
       ipAddress = lanInterface.ip4;
     } else {
       // Second priority: any 192.168.x.x except VirtualBox (192.168.56.x)
@@ -56,6 +61,7 @@ async function getComputerInfo() {
       );
       
       if (homeInterface) {
+        selectedInterface = homeInterface;
         ipAddress = homeInterface.ip4;
       } else {
         // Fallback: any valid non-localhost IP
@@ -67,6 +73,7 @@ async function getComputerInfo() {
             !iface.ip4.startsWith('169.254.')
         );
         if (fallbackInterface) {
+          selectedInterface = fallbackInterface;
           ipAddress = fallbackInterface.ip4;
         }
       }
@@ -79,7 +86,7 @@ async function getComputerInfo() {
       id: CONFIG.computerId,
       name: os.hostname(),
       ip: ipAddress,
-      mac: validInterface ? validInterface.mac : 'unknown',
+      mac: selectedInterface?.mac || 'unknown',
       platform: osInfo.platform,
       distro: osInfo.distro,
       release: osInfo.release,
@@ -239,30 +246,124 @@ async function connect() {
 // Execute commands from server
 async function executeCommand(command) {
   const { action, params } = command;
+  let result = null;
 
-  switch (action) {
-    case 'lock':
-      await lockComputer();
-      break;
-    case 'logout':
-      await logoutUser();
-      break;
-    case 'restart':
-      await restartComputer();
-      break;
-    case 'shutdown':
-      await shutdownComputer();
-      break;
-    case 'message':
-      await showMessage(params.message);
-      break;
-    case 'get_status':
-      const status = await getSystemStatus();
-      socket.emit('agent_status_update', status);
-      break;
-    default:
-      console.log(`Unknown command: ${action}`);
+  try {
+    switch (action) {
+      case 'lock':
+        await lockComputer();
+        break;
+      case 'logout':
+        await logoutUser();
+        break;
+      case 'restart':
+        await restartComputer();
+        break;
+      case 'shutdown':
+        await shutdownComputer();
+        break;
+      case 'message':
+        await showMessage(params?.message);
+        break;
+      case 'get_status':
+        result = await getSystemStatus();
+        socket.emit('agent_status_update', result);
+        break;
+      case 'set_website_blocklist':
+        result = await setWebsiteBlocklist(params?.websites || []);
+        break;
+      case 'clear_website_blocklist':
+        result = await clearWebsiteBlocklist();
+        break;
+      default:
+        throw new Error(`Unknown command: ${action}`);
+    }
+
+    sendCommandResult({
+      action,
+      success: true,
+      result,
+      from: command.from
+    });
+  } catch (error) {
+    console.error(`Command failed (${action}):`, error.message);
+    sendCommandResult({
+      action,
+      success: false,
+      error: error.message,
+      from: command.from
+    });
   }
+}
+
+function sendCommandResult(payload) {
+  if (!socket) return;
+  socket.emit('command_result', {
+    ...payload,
+    computerId: CONFIG.computerId,
+    timestamp: new Date().toISOString()
+  });
+}
+
+function sanitizeWebsites(websites = []) {
+  const cleaned = new Set();
+  websites.forEach((website) => {
+    const normalized = String(website || '')
+      .trim()
+      .toLowerCase()
+      .replace(/^https?:\/\//, '')
+      .replace(/^www\./, '')
+      .split('/')[0];
+    if (normalized) cleaned.add(normalized);
+  });
+  return Array.from(cleaned);
+}
+
+function buildBlockSection(websites) {
+  const lines = [BLOCK_START_MARKER];
+  websites.forEach((site) => {
+    lines.push(`127.0.0.1 ${site}`);
+    lines.push(`127.0.0.1 www.${site}`);
+  });
+  lines.push(BLOCK_END_MARKER);
+  return `${lines.join('\r\n')}\r\n`;
+}
+
+function removeManagedSection(content) {
+  const sectionRegex = new RegExp(
+    `${BLOCK_START_MARKER}[\\s\\S]*?${BLOCK_END_MARKER}\\r?\\n?`,
+    'g'
+  );
+  return content.replace(sectionRegex, '');
+}
+
+async function setWebsiteBlocklist(websites) {
+  if (process.platform !== 'win32') {
+    throw new Error('Website blocking currently supports Windows only');
+  }
+
+  const sanitized = sanitizeWebsites(websites);
+  if (sanitized.length === 0) {
+    throw new Error('No valid websites provided');
+  }
+
+  let hostsContent = await fs.readFile(HOSTS_PATH, 'utf8');
+  hostsContent = removeManagedSection(hostsContent).trimEnd();
+  hostsContent += `\r\n\r\n${buildBlockSection(sanitized)}`;
+  await fs.writeFile(HOSTS_PATH, hostsContent, 'utf8');
+
+  return { blockedSites: sanitized };
+}
+
+async function clearWebsiteBlocklist() {
+  if (process.platform !== 'win32') {
+    throw new Error('Website blocking currently supports Windows only');
+  }
+
+  const hostsContent = await fs.readFile(HOSTS_PATH, 'utf8');
+  const updatedContent = removeManagedSection(hostsContent).trimEnd() + '\r\n';
+  await fs.writeFile(HOSTS_PATH, updatedContent, 'utf8');
+  return { cleared: true };
 }
 
 // Lock computer (Windows)
