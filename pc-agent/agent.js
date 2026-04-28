@@ -3,6 +3,7 @@ const si = require('systeminformation');
 const os = require('os');
 const { exec } = require('child_process');
 const path = require('path');
+const fs = require('fs').promises;
 
 // Configuration
 const CONFIG = {
@@ -20,6 +21,9 @@ let reconnectAttempts = 0;
 let heartbeatTimer = null;
 let statusUpdateTimer = null;
 let isRegistered = false;
+const HOSTS_PATH = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
+const BLOCK_START_MARKER = '# DYCICLMS_WEBSITE_BLOCK_START';
+const BLOCK_END_MARKER = '# DYCICLMS_WEBSITE_BLOCK_END';
 
 // Get computer information
 async function getComputerInfo() {
@@ -239,29 +243,125 @@ async function connect() {
 // Execute commands from server
 async function executeCommand(command) {
   const { action, params } = command;
+  let result = null;
 
-  switch (action) {
-    case 'lock':
-      await lockComputer();
-      break;
-    case 'logout':
-      await logoutUser();
-      break;
-    case 'restart':
-      await restartComputer();
-      break;
-    case 'shutdown':
-      await shutdownComputer();
-      break;
-    case 'message':
-      await showMessage(params.message);
-      break;
-    case 'get_status':
-      const status = await getSystemStatus();
-      socket.emit('agent_status_update', status);
-      break;
-    default:
-      console.log(`Unknown command: ${action}`);
+  try {
+    switch (action) {
+      case 'lock':
+        await lockComputer();
+        break;
+      case 'logout':
+        await logoutUser();
+        break;
+      case 'restart':
+        await restartComputer();
+        break;
+      case 'shutdown':
+        await shutdownComputer();
+        break;
+      case 'message':
+        await showMessage(params.message);
+        break;
+      case 'get_status':
+        const status = await getSystemStatus();
+        socket.emit('agent_status_update', status);
+        result = status;
+        break;
+      case 'set_website_blocklist':
+        result = await setWebsiteBlocklist(params?.websites || []);
+        break;
+      case 'clear_website_blocklist':
+        result = await clearWebsiteBlocklist();
+        break;
+      default:
+        console.log(`Unknown command: ${action}`);
+        result = { warning: `Unknown command: ${action}` };
+    }
+
+    socket.emit('command_result', {
+      action,
+      success: true,
+      result,
+      from: command?.from
+    });
+  } catch (error) {
+    console.error(`Error executing command "${action}":`, error.message);
+    socket.emit('command_result', {
+      action,
+      success: false,
+      error: error.message || 'Unknown command execution error',
+      from: command?.from
+    });
+  }
+}
+
+function sanitizeWebsites(websites) {
+  const unique = new Set();
+  (Array.isArray(websites) ? websites : []).forEach((entry) => {
+    if (!entry || typeof entry !== 'string') return;
+    let host = entry.trim().toLowerCase();
+    host = host.replace(/^https?:\/\//, '');
+    host = host.replace(/^www\./, '');
+    host = host.split('/')[0];
+    host = host.trim();
+    if (host) unique.add(host);
+  });
+  return Array.from(unique);
+}
+
+function buildBlockSection(websites) {
+  const lines = [BLOCK_START_MARKER];
+  websites.forEach((site) => {
+    lines.push(`127.0.0.1 ${site}`);
+    lines.push(`127.0.0.1 www.${site}`);
+  });
+  lines.push(BLOCK_END_MARKER);
+  return `\n${lines.join('\n')}\n`;
+}
+
+function removeManagedSection(content) {
+  const escapedStart = BLOCK_START_MARKER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escapedEnd = BLOCK_END_MARKER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const sectionRegex = new RegExp(`\\r?\\n?${escapedStart}[\\s\\S]*?${escapedEnd}\\r?\\n?`, 'g');
+  return content.replace(sectionRegex, '\n');
+}
+
+async function setWebsiteBlocklist(websites) {
+  if (process.platform !== 'win32') {
+    throw new Error('Website blocking is only supported on Windows targets');
+  }
+
+  const sanitized = sanitizeWebsites(websites);
+  if (sanitized.length === 0) {
+    throw new Error('No valid websites provided for blocklist');
+  }
+
+  try {
+    const currentHosts = await fs.readFile(HOSTS_PATH, 'utf8');
+    const cleanedHosts = removeManagedSection(currentHosts).trimEnd();
+    const blockSection = buildBlockSection(sanitized).replace(/\n/g, '\r\n');
+    const nextHosts = `${cleanedHosts}${blockSection}`;
+    await fs.writeFile(HOSTS_PATH, nextHosts, 'utf8');
+    console.log(`Applied website blocklist for ${sanitized.length} site(s)`);
+    return { blockedSites: sanitized };
+  } catch (error) {
+    throw new Error(`Failed to apply website blocklist: ${error.message}`);
+  }
+}
+
+async function clearWebsiteBlocklist() {
+  if (process.platform !== 'win32') {
+    throw new Error('Website blocking is only supported on Windows targets');
+  }
+
+  try {
+    const currentHosts = await fs.readFile(HOSTS_PATH, 'utf8');
+    const cleanedHosts = removeManagedSection(currentHosts);
+    await fs.writeFile(HOSTS_PATH, cleanedHosts, 'utf8');
+    console.log('Cleared managed website blocklist');
+    return { cleared: true };
+  } catch (error) {
+    throw new Error(`Failed to clear website blocklist: ${error.message}`);
   }
 }
 
