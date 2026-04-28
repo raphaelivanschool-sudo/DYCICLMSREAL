@@ -21,6 +21,9 @@ const __dirname = path.dirname(__filename);
 // Configuration
 const CONFIG_PATH = path.join(process.env.PROGRAMDATA || os.homedir(), 'DYCI-Agent', 'config.json');
 const LOG_PATH = path.join(process.env.PROGRAMDATA || os.homedir(), 'DYCI-Agent', 'agent.log');
+const HOSTS_PATH = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
+const BLOCK_START_MARKER = '# DYCICLMS_WEBSITE_BLOCK_START';
+const BLOCK_END_MARKER = '# DYCICLMS_WEBSITE_BLOCK_END';
 
 class PCAgent {
   constructor() {
@@ -451,6 +454,12 @@ class PCAgent {
             timeoutMs: params?.timeoutMs
           });
           break;
+        case 'set_website_blocklist':
+          result = await this.setWebsiteBlocklist(params?.websites || []);
+          break;
+        case 'clear_website_blocklist':
+          result = await this.clearWebsiteBlocklist();
+          break;
         default:
           result = { success: false, error: `Unknown command: ${action}` };
       }
@@ -603,6 +612,74 @@ class PCAgent {
       password += chars.charAt(Math.floor(Math.random() * chars.length));
     }
     return password;
+  }
+
+  sanitizeWebsites(websites = []) {
+    const cleaned = new Set();
+    websites.forEach((website) => {
+      const normalized = String(website || '')
+        .trim()
+        .toLowerCase()
+        .replace(/^https?:\/\//, '')
+        .replace(/^www\./, '')
+        .split('/')[0];
+      if (normalized) cleaned.add(normalized);
+    });
+    return Array.from(cleaned);
+  }
+
+  buildBlockSection(websites) {
+    const lines = [BLOCK_START_MARKER];
+    websites.forEach((site) => {
+      lines.push(`127.0.0.1 ${site}`);
+      lines.push(`127.0.0.1 www.${site}`);
+    });
+    lines.push(BLOCK_END_MARKER);
+    return `${lines.join('\r\n')}\r\n`;
+  }
+
+  removeManagedBlockSection(content) {
+    const sectionRegex = new RegExp(
+      `${BLOCK_START_MARKER}[\\s\\S]*?${BLOCK_END_MARKER}\\r?\\n?`,
+      'g'
+    );
+    return content.replace(sectionRegex, '');
+  }
+
+  async setWebsiteBlocklist(websites = []) {
+    if (process.platform !== 'win32') {
+      throw new Error('Website blocking currently supports Windows only');
+    }
+
+    const sanitized = this.sanitizeWebsites(websites);
+    if (sanitized.length === 0) {
+      throw new Error('No valid websites provided');
+    }
+
+    try {
+      let hostsContent = await fs.promises.readFile(HOSTS_PATH, 'utf8');
+      hostsContent = this.removeManagedBlockSection(hostsContent).trimEnd();
+      hostsContent += `\r\n\r\n${this.buildBlockSection(sanitized)}`;
+      await fs.promises.writeFile(HOSTS_PATH, hostsContent, 'utf8');
+      return { success: true, blockedSites: sanitized };
+    } catch (error) {
+      throw new Error(`Failed to update hosts file: ${error.message}`);
+    }
+  }
+
+  async clearWebsiteBlocklist() {
+    if (process.platform !== 'win32') {
+      throw new Error('Website blocking currently supports Windows only');
+    }
+
+    try {
+      const hostsContent = await fs.promises.readFile(HOSTS_PATH, 'utf8');
+      const updatedContent = this.removeManagedBlockSection(hostsContent).trimEnd() + '\r\n';
+      await fs.promises.writeFile(HOSTS_PATH, updatedContent, 'utf8');
+      return { success: true, cleared: true };
+    } catch (error) {
+      throw new Error(`Failed to clear hosts file blocklist: ${error.message}`);
+    }
   }
 
   async run() {

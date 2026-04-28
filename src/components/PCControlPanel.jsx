@@ -10,6 +10,8 @@ const PCControlPanel = () => {
   const [scanProgress, setScanProgress] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [toast, setToast] = useState(null);
+  const [sendingCommand, setSendingCommand] = useState({});
   const [lastScan, setLastScan] = useState(null);
   const [agentCount, setAgentCount] = useState(0);
   const [subnet, setSubnet] = useState('');
@@ -310,10 +312,36 @@ const PCControlPanel = () => {
     setSelectedPC(null);
   };
 
-  const lockPC = (pc) => {
-    // In a real implementation, this would send a command to the PC
-    alert(`Lock command sent to ${pc.name} (${pc.ip})`);
-    // You could use your custom agent or PsExec for this
+  const showToast = (message, type = 'success') => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 3000);
+  };
+
+  const canSendAgentCommand = (pc) => {
+    // Only agent-connected devices can receive commands reliably.
+    // Broadcast-only services may exist without the DYCI agent installed.
+    if (pc.source === 'agent') return true;
+    if (pc.source === 'broadcast' && pc.hasAgent) return true;
+    return false;
+  };
+
+  const lockPC = async (pc) => {
+    if (!canSendAgentCommand(pc)) {
+      showToast('Lock requires the DYCI PC agent. Install the agent on this device first.', 'error');
+      return;
+    }
+
+    const key = pc.id || pc.ip;
+    setSendingCommand((prev) => ({ ...prev, [key]: true }));
+    try {
+      await agentsApi.sendCommand(pc.id, 'lock');
+      showToast(`Lock command sent to ${pc.name}`);
+    } catch (err) {
+      console.error('Failed to lock PC:', err);
+      showToast(err.response?.data?.error || err.message || 'Failed to send lock command', 'error');
+    } finally {
+      setSendingCommand((prev) => ({ ...prev, [key]: false }));
+    }
   };
 
   const shutdownPC = (pc) => {
@@ -543,9 +571,23 @@ const PCControlPanel = () => {
               </button>
               <button 
                 onClick={() => lockPC(pc)}
-                className="flex items-center justify-center gap-2 bg-yellow-500 text-white px-3 py-2 rounded-lg hover:bg-yellow-600 transition-colors"
+                disabled={!canSendAgentCommand(pc) || sendingCommand[(pc.id || pc.ip)]}
+                title={
+                  canSendAgentCommand(pc)
+                    ? 'Lock Screen'
+                    : 'Install DYCI PC agent to enable locking'
+                }
+                className={`flex items-center justify-center gap-2 px-3 py-2 rounded-lg transition-colors
+                  ${canSendAgentCommand(pc)
+                    ? 'bg-yellow-500 text-white hover:bg-yellow-600'
+                    : 'bg-gray-200 text-gray-500 cursor-not-allowed'
+                  }`}
               >
-                <Lock className="w-4 h-4" />
+                {sendingCommand[(pc.id || pc.ip)] ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Lock className="w-4 h-4" />
+                )}
               </button>
               <button 
                 onClick={() => shutdownPC(pc)}
@@ -799,6 +841,16 @@ const PCControlPanel = () => {
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Toast */}
+      {toast && (
+        <div
+          className={`fixed bottom-4 right-4 px-4 py-2 rounded-lg shadow-lg z-50 text-sm font-medium
+            ${toast.type === 'success' ? 'bg-gray-900 text-white' : 'bg-red-600 text-white'}`}
+        >
+          {toast.message}
         </div>
       )}
     </div>
