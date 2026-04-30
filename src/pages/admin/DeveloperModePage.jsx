@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Monitor, RefreshCw, Search, AlertCircle, Radio } from 'lucide-react';
 import networkApi from '../../services/network-api.js';
+import { agentsApi } from '../../services/api.js';
 import socketService from '../../services/socketService.js';
 
 const RESULT_TIMEOUT_MS = 90000;
@@ -48,7 +49,10 @@ function DeveloperModePage() {
     setLockError('');
 
     try {
-      await networkApi.lockDiscoveredPc(ip);
+      if (!device.agentId) {
+        throw new Error('Lock requires an agent-connected PC. Run the DYCI agent on this target.');
+      }
+      await agentsApi.sendCommand(device.agentId, 'lock', {});
       setLockStatus(`✓ ${hostname} Locked`);
       setLockError('');
     } catch (error) {
@@ -74,6 +78,30 @@ function DeveloperModePage() {
     let resolveComplete;
 
     try {
+      // Always include agent-connected PCs in discovery results.
+      const connectedAgentsResponse = await agentsApi.getConnected();
+      const connectedAgents = connectedAgentsResponse?.data?.devices || [];
+      if (connectedAgents.length > 0) {
+        setResultsByIp((prev) => {
+          const next = { ...prev };
+          connectedAgents.forEach((device) => {
+            if (!device?.ip) return;
+            const existing = next[device.ip] || {};
+            next[device.ip] = {
+              ...existing,
+              hostname: device.name || existing.hostname || 'Unknown',
+              ip: device.ip,
+              mac: device.mac || existing.mac || '',
+              status: device.status || existing.status || 'online',
+              connection_type: 'agent',
+              source: existing.source ? `${existing.source}+agent` : 'agent',
+              agentId: device.id
+            };
+          });
+          return next;
+        });
+      }
+
       const completionPromise = new Promise((resolve, reject) => {
         resolveComplete = resolve;
 
@@ -95,7 +123,9 @@ function DeveloperModePage() {
                 mac: event.device.mac || existing.mac || '',
                 status: event.device.status || existing.status || 'online',
                 connection_type: existing.connection_type || 'unknown',
-                source: existing.source === 'broadcast' ? 'broadcast+scan' : 'scan'
+                source: existing.source
+                  ? `${existing.source.includes('scan') ? existing.source : `${existing.source}+scan`}`
+                  : 'scan'
               }
             };
           });
