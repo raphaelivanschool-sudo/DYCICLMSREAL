@@ -1,7 +1,5 @@
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { Outlet } from "react-router-dom";
-import { useState } from "react";
-import MessagingModule from "../messaging/MessagingModule";
 import {
   LayoutDashboard,
   Monitor,
@@ -13,9 +11,7 @@ import {
   Building2,
   Bell,
   LogOut,
-  ChevronRight,
   User,
-  MessageCircle,
   Users,
   Calendar,
   GraduationCap,
@@ -40,23 +36,17 @@ const navigation = [
   { name: "System Logs & Reports", href: "/admin/logs", icon: FileText },
   { name: "Tickets / Support", href: "/admin/tickets", icon: Ticket },
   { name: "Inventory", href: "/admin/hardware-inventory", icon: Package },
-  { name: "Messaging", href: "/admin/chats", icon: MessageCircle },
   { name: "Grading", href: "/admin/grading", icon: GraduationCap },
 ];
 
 function AdminLayout() {
   const location = useLocation();
   const navigate = useNavigate();
-  const [showMessaging, setShowMessaging] = useState(false);
 
   const handleLogout = () => {
     // Clear all localStorage items
     localStorage.clear();
     navigate("/");
-  };
-
-  const handleChatsClick = () => {
-    setShowMessaging(true);
   };
 
   const getBreadcrumb = () => {
@@ -86,38 +76,21 @@ function AdminLayout() {
             {navigation.map((item) => {
               const isActive = location.pathname === item.href;
               const Icon = item.icon;
-              const isMessaging = item.name === "Messaging";
               return (
                 <li key={item.name}>
-                  {isMessaging ? (
-                    <button
-                      onClick={handleChatsClick}
-                      className={`flex items-center w-full px-3 py-2.5 rounded-md text-sm font-medium transition-colors ${
-                        showMessaging
-                          ? "bg-blue-600 text-white"
-                          : "text-slate-300 hover:bg-slate-800 hover:text-white"
-                      }`}
-                    >
-                      <Icon
-                        className={`w-4 h-4 mr-3 ${showMessaging ? "text-white" : "text-slate-400"}`}
-                      />
-                      {item.name}
-                    </button>
-                  ) : (
-                    <Link
-                      to={item.href}
-                      className={`flex items-center px-3 py-2.5 rounded-md text-sm font-medium transition-colors ${
-                        isActive
-                          ? "bg-blue-600 text-white"
-                          : "text-slate-300 hover:bg-slate-800 hover:text-white"
-                      }`}
-                    >
-                      <Icon
-                        className={`w-4 h-4 mr-3 ${isActive ? "text-white" : "text-slate-400"}`}
-                      />
-                      {item.name}
-                    </Link>
-                  )}
+                  <Link
+                    to={item.href}
+                    className={`flex items-center px-3 py-2.5 rounded-md text-sm font-medium transition-colors ${
+                      isActive
+                        ? "bg-blue-600 text-white"
+                        : "text-slate-300 hover:bg-slate-800 hover:text-white"
+                    }`}
+                  >
+                    <Icon
+                      className={`w-4 h-4 mr-3 ${isActive ? "text-white" : "text-slate-400"}`}
+                    />
+                    {item.name}
+                  </Link>
                 </li>
               );
             })}
@@ -176,13 +149,6 @@ function AdminLayout() {
         </main>
       </div>
 
-      {/* Messaging Module */}
-      <MessagingModule
-        isOpen={showMessaging}
-        onClose={() => setShowMessaging(false)}
-        userRole="admin"
-        currentUser={{ name: "Administrator", initials: "AD" }}
-      />
     </div>
   );
 }

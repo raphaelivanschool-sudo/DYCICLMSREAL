@@ -460,6 +460,12 @@ class PCAgent {
         case 'clear_website_blocklist':
           result = await this.clearWebsiteBlocklist();
           break;
+        case 'disable_wifi':
+          result = await this.disableWifiAdapter(params?.adapterName);
+          break;
+        case 'enable_wifi':
+          result = await this.enableWifiAdapter(params?.adapterName);
+          break;
         default:
           result = { success: false, error: `Unknown command: ${action}` };
       }
@@ -680,6 +686,72 @@ class PCAgent {
     } catch (error) {
       throw new Error(`Failed to clear hosts file blocklist: ${error.message}`);
     }
+  }
+
+  async disableWifiAdapter(preferredAdapterName) {
+    if (process.platform !== 'win32') {
+      throw new Error('Wi-Fi control currently supports Windows only');
+    }
+
+    const preferred = String(preferredAdapterName || '').trim();
+    const escapedName = preferred.replace(/'/g, "''");
+
+    const discoverScript = preferred
+      ? `$a = Get-NetAdapter -Name '${escapedName}' -ErrorAction SilentlyContinue; if ($a) { $a.Name }`
+      : "(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' -and ($_.InterfaceDescription -match 'Wireless|Wi-Fi|802\\.11' -or $_.Name -match 'Wi-?Fi|Wireless|WLAN') } | Select-Object -First 1 -ExpandProperty Name)";
+
+    const { stdout: adapterStdout } = await execAsync(`powershell -NoProfile -Command "${discoverScript}"`);
+    const adapterName = adapterStdout.trim();
+
+    if (!adapterName) {
+      throw new Error('No active Wi-Fi adapter found');
+    }
+
+    const disableScript = `Disable-NetAdapter -Name '${adapterName.replace(/'/g, "''")}' -Confirm:$false -PassThru | Out-Null`;
+    await execAsync(`powershell -NoProfile -Command "${disableScript}"`);
+
+    return {
+      success: true,
+      disabled: true,
+      adapter: adapterName,
+      message: `Disabled Wi-Fi adapter: ${adapterName}`
+    };
+  }
+
+  async enableWifiAdapter(preferredAdapterName) {
+    if (process.platform !== 'win32') {
+      throw new Error('Wi-Fi control currently supports Windows only');
+    }
+
+    const preferred = String(preferredAdapterName || '').trim();
+    const escapedName = preferred.replace(/'/g, "''");
+
+    const discoverScript = preferred
+      ? `$a = Get-NetAdapter -Name '${escapedName}' -ErrorAction SilentlyContinue; if ($a) { $a.Name }`
+      : "(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Disabled' -and ($_.InterfaceDescription -match 'Wireless|Wi-Fi|802\\.11' -or $_.Name -match 'Wi-?Fi|Wireless|WLAN') } | Select-Object -First 1 -ExpandProperty Name); if (-not $?) { }";
+
+    const { stdout: disabledStdout } = await execAsync(`powershell -NoProfile -Command "${discoverScript}"`);
+    let adapterName = disabledStdout.trim();
+
+    if (!adapterName) {
+      const fallbackScript = "(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceDescription -match 'Wireless|Wi-Fi|802\\.11' -or $_.Name -match 'Wi-?Fi|Wireless|WLAN' } | Select-Object -First 1 -ExpandProperty Name)";
+      const { stdout: anyStdout } = await execAsync(`powershell -NoProfile -Command "${fallbackScript}"`);
+      adapterName = anyStdout.trim();
+    }
+
+    if (!adapterName) {
+      throw new Error('No Wi-Fi adapter found to enable');
+    }
+
+    const enableScript = `Enable-NetAdapter -Name '${adapterName.replace(/'/g, "''")}' -Confirm:$false -PassThru | Out-Null`;
+    await execAsync(`powershell -NoProfile -Command "${enableScript}"`);
+
+    return {
+      success: true,
+      enabled: true,
+      adapter: adapterName,
+      message: `Enabled Wi-Fi adapter: ${adapterName}`
+    };
   }
 
   async run() {

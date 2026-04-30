@@ -273,6 +273,12 @@ async function executeCommand(command) {
       case 'clear_website_blocklist':
         result = await clearWebsiteBlocklist();
         break;
+      case 'disable_wifi':
+        result = await disableWifiAdapter(params?.adapterName);
+        break;
+      case 'enable_wifi':
+        result = await enableWifiAdapter(params?.adapterName);
+        break;
       default:
         console.log(`Unknown command: ${action}`);
         result = { warning: `Unknown command: ${action}` };
@@ -363,6 +369,85 @@ async function clearWebsiteBlocklist() {
   } catch (error) {
     throw new Error(`Failed to clear website blocklist: ${error.message}`);
   }
+}
+
+async function execCommand(command) {
+  return new Promise((resolve, reject) => {
+    exec(command, (error, stdout, stderr) => {
+      if (error) {
+        reject(new Error(stderr || error.message));
+        return;
+      }
+      resolve({ stdout: stdout || '', stderr: stderr || '' });
+    });
+  });
+}
+
+async function disableWifiAdapter(preferredAdapterName) {
+  if (process.platform !== 'win32') {
+    throw new Error('Wi-Fi control is only supported on Windows targets');
+  }
+
+  const preferred = String(preferredAdapterName || '').trim();
+  const escapedPreferred = preferred.replace(/'/g, "''");
+
+  const discoverScript = preferred
+    ? `$a = Get-NetAdapter -Name '${escapedPreferred}' -ErrorAction SilentlyContinue; if ($a) { $a.Name }`
+    : "(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' -and ($_.InterfaceDescription -match 'Wireless|Wi-Fi|802\\.11' -or $_.Name -match 'Wi-?Fi|Wireless|WLAN') } | Select-Object -First 1 -ExpandProperty Name)";
+
+  const { stdout } = await execCommand(`powershell -NoProfile -Command "${discoverScript}"`);
+  const adapterName = stdout.trim();
+  if (!adapterName) {
+    throw new Error('No active Wi-Fi adapter found');
+  }
+
+  const escapedName = adapterName.replace(/'/g, "''");
+  const disableScript = `Disable-NetAdapter -Name '${escapedName}' -Confirm:$false -PassThru | Out-Null`;
+  await execCommand(`powershell -NoProfile -Command "${disableScript}"`);
+
+  return {
+    success: true,
+    disabled: true,
+    adapter: adapterName,
+    message: `Disabled Wi-Fi adapter: ${adapterName}`
+  };
+}
+
+async function enableWifiAdapter(preferredAdapterName) {
+  if (process.platform !== 'win32') {
+    throw new Error('Wi-Fi control is only supported on Windows targets');
+  }
+
+  const preferred = String(preferredAdapterName || '').trim();
+  const escapedPreferred = preferred.replace(/'/g, "''");
+
+  const discoverScript = preferred
+    ? `$a = Get-NetAdapter -Name '${escapedPreferred}' -ErrorAction SilentlyContinue; if ($a) { $a.Name }`
+    : "(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Disabled' -and ($_.InterfaceDescription -match 'Wireless|Wi-Fi|802\\.11' -or $_.Name -match 'Wi-?Fi|Wireless|WLAN') } | Select-Object -First 1 -ExpandProperty Name)";
+
+  const { stdout: disabledStdout } = await execCommand(`powershell -NoProfile -Command "${discoverScript}"`);
+  let adapterName = disabledStdout.trim();
+
+  if (!adapterName) {
+    const fallbackScript = "(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceDescription -match 'Wireless|Wi-Fi|802\\.11' -or $_.Name -match 'Wi-?Fi|Wireless|WLAN' } | Select-Object -First 1 -ExpandProperty Name)";
+    const { stdout: anyStdout } = await execCommand(`powershell -NoProfile -Command "${fallbackScript}"`);
+    adapterName = anyStdout.trim();
+  }
+
+  if (!adapterName) {
+    throw new Error('No Wi-Fi adapter found to enable');
+  }
+
+  const escapedName = adapterName.replace(/'/g, "''");
+  const enableScript = `Enable-NetAdapter -Name '${escapedName}' -Confirm:$false -PassThru | Out-Null`;
+  await execCommand(`powershell -NoProfile -Command "${enableScript}"`);
+
+  return {
+    success: true,
+    enabled: true,
+    adapter: adapterName,
+    message: `Enabled Wi-Fi adapter: ${adapterName}`
+  };
 }
 
 // Lock computer (Windows)
