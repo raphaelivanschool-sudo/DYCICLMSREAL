@@ -115,7 +115,7 @@ function SecuritySettings() {
           ipsWithAgent.add(device.ip);
           merged.push({
             id: String(device.id),
-            name: device.name || device.hostname || `PC-${String(device.ip).split('.').pop()}`,
+            name: device.user || device.name || device.hostname || `PC-${String(device.ip).split('.').pop()}`,
             ip: device.ip,
             status: device.status || 'online',
             source: 'agent',
@@ -129,7 +129,7 @@ function SecuritySettings() {
           if (!ipsWithAgent.has(device.ip)) {
             merged.push({
               id: `net-${device.ip}`,
-              name: device.name || device.hostname || `PC-${String(device.ip).split('.').pop()}`,
+              name: device.user || device.name || device.hostname || `PC-${String(device.ip).split('.').pop()}`,
               ip: device.ip,
               status: device.status || 'online',
               source: 'network',

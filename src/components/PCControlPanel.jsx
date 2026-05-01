@@ -50,7 +50,7 @@ const PCControlPanel = () => {
           agentIPs.add(device.ip);
           allDevices.push({
             id: device.id || `agent-${device.ip}`,
-            name: device.name || device.hostname || `PC-${device.ip.split('.').pop()}`,
+            name: device.user || device.name || device.hostname || `PC-${device.ip.split('.').pop()}`,
             ip: device.ip,
             status: device.status || 'online',
             vncPort: 5900,
@@ -71,7 +71,7 @@ const PCControlPanel = () => {
           if (!agentIPs.has(device.ip)) {
             allDevices.push({
               id: device.id || `net-${device.ip}`,
-              name: device.name || device.hostname || `PC-${device.ip.split('.').pop()}`,
+              name: device.user || device.name || device.hostname || `PC-${device.ip.split('.').pop()}`,
               ip: device.ip,
               status: device.status || 'online',
               vncPort: device.openPorts?.includes(5900) ? 5900 : 5900,
@@ -284,7 +284,7 @@ const PCControlPanel = () => {
         .filter(s => !existingIPs.has(s.ip))
         .map(s => ({
           id: s.computerId || `broadcast-${s.ip}`,
-          name: s.hostname || `PC-${s.ip.split('.').pop()}`,
+          name: s.user || s.hostname || `PC-${s.ip.split('.').pop()}`,
           ip: s.ip,
           status: 'online',
           vncPort: s.port,

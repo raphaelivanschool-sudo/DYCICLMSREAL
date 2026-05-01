@@ -62,10 +62,11 @@ function NetworkControl() {
 
   const handleDisableWifi = async (machine) => {
     const key = `${machine.id}-disable`;
+    const machineLabel = machine.user || machine.name || machine.hostname || machine.id;
     try {
       setCommandLoading((prev) => ({ ...prev, [key]: true }));
       await agentsApi.sendCommand(machine.id, 'disable_wifi', {});
-      showToast(`Disable Wi-Fi command sent to ${machine.name || machine.hostname}`);
+      showToast(`Disable Wi-Fi command sent to ${machineLabel}`);
     } catch (err) {
       showToast(err?.response?.data?.error || 'Failed to send disable Wi-Fi command.', 'error');
     } finally {
@@ -75,10 +76,11 @@ function NetworkControl() {
 
   const handleEnableWifi = async (machine) => {
     const key = `${machine.id}-enable`;
+    const machineLabel = machine.user || machine.name || machine.hostname || machine.id;
     try {
       setCommandLoading((prev) => ({ ...prev, [key]: true }));
       await agentsApi.sendCommand(machine.id, 'enable_wifi', {});
-      showToast(`Enable Wi-Fi command sent to ${machine.name || machine.hostname}`);
+      showToast(`Enable Wi-Fi command sent to ${machineLabel}`);
     } catch (err) {
       showToast(err?.response?.data?.error || 'Failed to send enable Wi-Fi command.', 'error');
     } finally {
@@ -195,7 +197,7 @@ function NetworkControl() {
         <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
           {machines.map((machine) => {
             const isOnline = String(machine.status).toLowerCase() === 'online';
-            const machineLabel = machine.name || machine.hostname || machine.id;
+            const machineLabel = machine.user || machine.name || machine.hostname || machine.id;
             return (
               <div key={machine.id} className="bg-white rounded-lg border border-gray-200 shadow-sm">
                 <div className="p-6 border-b border-gray-100">

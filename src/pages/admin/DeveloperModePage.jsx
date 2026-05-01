@@ -36,7 +36,7 @@ function DeveloperModePage() {
   const lockDevice = async (device) => {
     if (!device?.ip) return;
 
-    const hostname = device.hostname || 'Unknown';
+    const hostname = device.user || device.hostname || 'Unknown';
     const ip = device.ip;
 
     const confirmed = window.confirm(
@@ -89,13 +89,14 @@ function DeveloperModePage() {
             const existing = next[device.ip] || {};
             next[device.ip] = {
               ...existing,
-              hostname: device.name || existing.hostname || 'Unknown',
+              hostname: device.user || device.name || existing.hostname || 'Unknown',
               ip: device.ip,
               mac: device.mac || existing.mac || '',
               status: device.status || existing.status || 'online',
               connection_type: 'agent',
               source: existing.source ? `${existing.source}+agent` : 'agent',
-              agentId: device.id
+              agentId: device.id,
+              user: device.user || existing.user || ''
             };
           });
           return next;
@@ -118,11 +119,12 @@ function DeveloperModePage() {
               ...prev,
               [ip]: {
                 ...existing,
-                hostname: event.device.hostname || existing.hostname || event.device.name || 'Unknown',
+                hostname: event.device.user || event.device.hostname || existing.hostname || event.device.name || 'Unknown',
                 ip,
                 mac: event.device.mac || existing.mac || '',
                 status: event.device.status || existing.status || 'online',
                 connection_type: existing.connection_type || 'unknown',
+                user: event.device.user || existing.user || '',
                 source: existing.source
                   ? `${existing.source.includes('scan') ? existing.source : `${existing.source}+scan`}`
                   : 'scan'
@@ -147,11 +149,12 @@ function DeveloperModePage() {
         setResultsByIp((prev) => ({
           ...prev,
           [data.ip]: {
-            hostname: data.hostname || 'Unknown',
+            hostname: data.user || data.hostname || 'Unknown',
             ip: data.ip,
             mac: '',
             status: 'online',
             connection_type: 'unknown',
+            user: data.user || '',
             source: 'broadcast'
           }
         }));
@@ -276,7 +279,7 @@ function DeveloperModePage() {
                     className={`border-t border-gray-100 cursor-pointer ${selectedIp === device.ip ? 'bg-amber-50' : ''}`}
                     onClick={() => setSelectedIp(device.ip || '')}
                   >
-                    <td className="px-4 py-3 text-gray-700">{device.hostname || 'Unknown'}</td>
+                    <td className="px-4 py-3 text-gray-700">{device.user || device.hostname || 'Unknown'}</td>
                     <td className="px-4 py-3 text-gray-700">{device.ip || '-'}</td>
                     <td className="px-4 py-3 text-gray-700">{device.mac || '-'}</td>
                     <td className="px-4 py-3 text-gray-700">{device.status || 'unknown'}</td>
