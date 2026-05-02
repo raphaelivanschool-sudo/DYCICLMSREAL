@@ -5,10 +5,87 @@ const os = require('os');
 const { exec } = require('child_process');
 const path = require('path');
 const fs = require('fs').promises;
+const http = require('http');
+const https = require('https');
+const util = require('util');
+
+function normalizeServerUrl(url) {
+  const s = String(url || '').trim().replace(/\/+$/, '');
+  return s || 'http://localhost:3001';
+}
+
+/**
+ * Verifies the same HTTP server Socket.IO uses responds (GET /health).
+ */
+function checkServerHealth(baseUrl) {
+  return new Promise((resolve) => {
+    let u;
+    try {
+      u = new URL(baseUrl);
+    } catch {
+      resolve({ ok: false, detail: 'Invalid SERVER_URL' });
+      return;
+    }
+    const lib = u.protocol === 'https:' ? https : http;
+    const port = u.port ? parseInt(u.port, 10) : u.protocol === 'https:' ? 443 : 80;
+    const options = {
+      hostname: u.hostname,
+      port,
+      path: '/health',
+      method: 'GET',
+      timeout: 5000,
+    };
+    const req = lib.request(options, (res) => {
+      res.resume();
+      resolve({ ok: res.statusCode === 200, detail: `HTTP ${res.statusCode}` });
+    });
+    req.on('error', (err) => {
+      resolve({ ok: false, detail: err.message || String(err) });
+    });
+    req.on('timeout', () => {
+      req.destroy();
+      resolve({ ok: false, detail: 'Connection timed out' });
+    });
+    req.end();
+  });
+}
+
+/** Readable Socket.IO / Engine.IO connect errors (avoids "websocket error ([object Object])"). */
+function formatSocketConnectError(err) {
+  if (!err) return 'unknown error';
+  const parts = [];
+  if (err.message) parts.push(err.message);
+  const d = err.description;
+  if (d != null) {
+    if (typeof d === 'string') parts.push(d);
+    else if (typeof d === 'object') {
+      try {
+        parts.push(JSON.stringify(d));
+      } catch {
+        parts.push(util.inspect(d, { depth: 3 }));
+      }
+    }
+  }
+  const inner = err.cause || err.error;
+  if (inner) {
+    const im = inner.message || inner.code || inner.errno;
+    if (im) parts.push(`cause: ${im}`);
+  }
+  if (err.type) parts.push(`type: ${err.type}`);
+  if (err.context && typeof err.context === 'object') {
+    try {
+      parts.push(`context: ${JSON.stringify(err.context)}`);
+    } catch {
+      /* ignore */
+    }
+  }
+  const out = parts.filter(Boolean).join(' | ');
+  return out || util.inspect(err, { depth: 2, breakLength: 100 });
+}
 
 // Configuration
 const CONFIG = {
-  serverUrl: process.env.SERVER_URL || 'http://localhost:3001',
+  serverUrl: normalizeServerUrl(process.env.SERVER_URL || 'http://localhost:3001'),
   computerId: process.env.COMPUTER_ID || `${os.hostname()}-${Math.random().toString(36).substr(2, 9)}`,
   heartbeatInterval: 30000, // 30 seconds
   statusUpdateInterval: 5000, // 5 seconds
@@ -44,29 +121,32 @@ async function getComputerInfo() {
     
     // First priority: 192.168.0.x (where test PC should be)
     const lanInterface = allInterfaces.find(
-      iface => iface && iface.ip4 && 
-        !iface.internal && 
+      iface => iface && iface.ip4 &&
+        !iface.internal &&
         iface.ip4.startsWith('192.168.0.')
     );
-    
+
+    let homeInterface;
+    let fallbackInterface;
+
     if (lanInterface) {
       ipAddress = lanInterface.ip4;
     } else {
       // Second priority: any 192.168.x.x except VirtualBox (192.168.56.x)
-      const homeInterface = allInterfaces.find(
-        iface => iface && iface.ip4 && 
-          !iface.internal && 
+      homeInterface = allInterfaces.find(
+        iface => iface && iface.ip4 &&
+          !iface.internal &&
           iface.ip4.startsWith('192.168.') &&
           !iface.ip4.startsWith('192.168.56.')  // Skip VirtualBox
       );
-      
+
       if (homeInterface) {
         ipAddress = homeInterface.ip4;
       } else {
         // Fallback: any valid non-localhost IP
-        const fallbackInterface = allInterfaces.find(
-          iface => iface && iface.ip4 && 
-            !iface.internal && 
+        fallbackInterface = allInterfaces.find(
+          iface => iface && iface.ip4 &&
+            !iface.internal &&
             !iface.ip4.startsWith('127.') &&
             !iface.ip4.startsWith('0.') &&
             !iface.ip4.startsWith('169.254.')
@@ -77,6 +157,8 @@ async function getComputerInfo() {
       }
     }
 
+    const chosenIface = lanInterface || homeInterface || fallbackInterface;
+
     // Get logged in user
     const user = await getLoggedInUser();
 
@@ -84,7 +166,7 @@ async function getComputerInfo() {
       id: CONFIG.computerId,
       name: os.hostname(),
       ip: ipAddress,
-      mac: validInterface ? validInterface.mac : 'unknown',
+      mac: chosenIface && chosenIface.mac ? chosenIface.mac : 'unknown',
       platform: osInfo.platform,
       distro: osInfo.distro,
       release: osInfo.release,
@@ -176,15 +258,46 @@ async function connect() {
   try {
     console.log(`Connecting to server: ${CONFIG.serverUrl}`);
 
+    const health = await checkServerHealth(CONFIG.serverUrl);
+    if (!health.ok) {
+      let netHint = '  Check SERVER_URL (use full URL e.g. http://192.168.1.10:3001)';
+      try {
+        const uu = new URL(CONFIG.serverUrl);
+        const p = uu.port || (uu.protocol === 'https:' ? '443' : '80');
+        netHint = `  From this PC: Test-NetConnection ${uu.hostname} -Port ${p}`;
+      } catch {
+        // keep default
+      }
+      const refused =
+        typeof health.detail === 'string' &&
+        (health.detail.includes('ECONNREFUSED') || health.detail.includes('refused'));
+      const startBackend =
+        refused ?
+          '\n  On the SERVER PC (the machine at that IP): open this repo, run `npm install` once, then:\n' +
+          '    npm run server:dev\n' +
+          '  Ensure MySQL is running and server/.env has DATABASE_URL (see HOW_TO_RUN.md).\n' +
+          '  Windows Firewall on that PC: allow inbound TCP on port 3001 (or the port in SERVER_URL).\n'
+        : '';
+      console.error(
+        `[Agent] HTTP check failed: ${health.detail}\n` +
+          `  Target: ${CONFIG.serverUrl}/health\n` +
+          '  Nothing answered — the Lab Management API is not listening there yet.' +
+          startBackend +
+          '  Or point SERVER_URL at the PC that actually runs the backend.\n' +
+          netHint
+      );
+    }
+
     socket = io(CONFIG.serverUrl, {
       auth: {
         // In production, use a proper authentication token
         token: process.env.AGENT_TOKEN || 'agent-token-placeholder'
       },
-      transports: ['polling', 'websocket'],
+      transports: ['websocket', 'polling'],
       reconnection: true,
       reconnectionAttempts: CONFIG.maxReconnectAttempts,
-      reconnectionDelay: CONFIG.reconnectInterval
+      reconnectionDelay: CONFIG.reconnectInterval,
+      timeout: 20000,
     });
 
     // Handle connection
@@ -227,7 +340,7 @@ async function connect() {
 
     // Handle errors
     socket.on('connect_error', (error) => {
-      console.error('Connection error:', error.message);
+      console.error('Connection error:', formatSocketConnectError(error));
       reconnectAttempts++;
       
       if (reconnectAttempts >= CONFIG.maxReconnectAttempts) {

@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import queue
+import socket
 import threading
 import time
 import traceback
@@ -12,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+import pyautogui
 import requests
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
@@ -25,6 +27,7 @@ APP_TITLE = "PC CONTROLLER v1.0"
 DEFAULT_AGENT_PORT = 5555
 STATUS_TIMEOUT_S = 2.0
 SCREENSHOT_TIMEOUT_S = 5.0
+PROJECTION_POST_TIMEOUT_S = 15.0
 
 
 def decode_screenshot_payload(payload: Dict[str, Any], max_size: Tuple[int, int]) -> Image.Image:
@@ -45,6 +48,25 @@ def decode_screenshot_payload(payload: Dict[str, Any], max_size: Tuple[int, int]
     mx, my = max_size
     img.thumbnail((max(1, mx), max(1, my)), Image.Resampling.LANCZOS)
     return img
+
+
+def projection_exception_message(exc: Exception) -> str:
+    if isinstance(exc, PermissionError):
+        return "Authentication failed — check API key"
+    if isinstance(exc, requests.Timeout):
+        return "PC not responding — connection timeout"
+    if isinstance(exc, requests.ConnectionError):
+        return "PC unreachable — check that the agent is running"
+    if isinstance(exc, requests.HTTPError):
+        code = exc.response.status_code if exc.response is not None else 0
+        if code == 401:
+            return "Authentication failed — check API key"
+        return f"Agent rejected ({code})"
+    if isinstance(exc, RuntimeError):
+        return str(exc)
+    if isinstance(exc, OSError):
+        return f"Failed to capture screen: {exc}"
+    return "Projection send failed"
 
 
 def screenshot_exception_message(exc: Exception) -> str:
@@ -254,6 +276,20 @@ class AgentClient:
         resp.raise_for_status()
         return resp.json()
 
+    def post_project(self, ip: str, api_key: str, json_body: Dict[str, Any]) -> requests.Response:
+        url = f"{self._base_url(ip)}/project"
+        return self._request(
+            "POST",
+            url,
+            api_key=api_key,
+            timeout=PROJECTION_POST_TIMEOUT_S,
+            json_body=json_body,
+        )
+
+    def post_stop_projection(self, ip: str, api_key: str) -> requests.Response:
+        url = f"{self._base_url(ip)}/stop_projection"
+        return self._request("POST", url, api_key=api_key, timeout=STATUS_TIMEOUT_S)
+
 
 class StatusChecker(threading.Thread):
     def __init__(
@@ -403,6 +439,10 @@ class ControllerApp:
         self._manual_screenshot_busy: bool = False
         self._last_selected_ip_snapshot: str = ""
 
+        self.projection_active: Dict[str, bool] = {}
+        self.projection_threads: Dict[str, threading.Thread] = {}
+        self.projection_lock = threading.Lock()
+
         self._build_ui()
         self._bind_shortcuts()
 
@@ -540,7 +580,16 @@ class ControllerApp:
 
         ttk.Button(btns, text="Lock", command=self.lock_pc).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(btns, text="Shutdown", command=self.shutdown_pc).pack(side=tk.LEFT, padx=(0, 6))
+        self.project_button = ttk.Button(btns, text="🖥️ Project Screen", command=self.project_screen_click, state=tk.DISABLED)
+        self.project_button.pack(side=tk.LEFT, padx=(0, 6))
+        self.stop_projection_button = ttk.Button(
+            btns, text="⏹️ Stop Projection", command=self.stop_projection_click, state=tk.DISABLED
+        )
+        self.stop_projection_button.pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(btns, text="Settings", command=self.open_settings).pack(side=tk.RIGHT)
+
+        self.projection_status_label = ttk.Label(self.right, text="Projection: idle", anchor="w")
+        self.projection_status_label.pack(fill=tk.X, pady=(0, 8))
 
         history = ttk.Frame(self.right)
         history.pack(fill=tk.X)
@@ -549,6 +598,7 @@ class ControllerApp:
         ttk.Button(history, text="Save Screenshot", command=self.save_screenshot).pack(side=tk.RIGHT)
 
         self._sync_refresh_button_state()
+        self._sync_projection_controls()
 
     def _bind_shortcuts(self) -> None:
         self.root.bind_all("<Control-r>", lambda e: self.refresh_screenshot())
@@ -605,6 +655,7 @@ class ControllerApp:
             if item:
                 self.screenshot_status_line.configure(text=f"Selected: {item.display_name()} ({item.ip})")
         self._sync_refresh_button_state()
+        self._sync_projection_controls()
 
     def _refresh_tree(self) -> None:
         self.tree.delete(*self.tree.get_children())
@@ -743,6 +794,7 @@ class ControllerApp:
             self.screenshot_status_line.configure(text="No PC selected")
             self.screenshot_meta.configure(text="")
             self._sync_refresh_button_state()
+            self._sync_projection_controls()
             return
         ip = sel[0]
         if ip != self._last_selected_ip_snapshot:
@@ -753,6 +805,7 @@ class ControllerApp:
         if item:
             self.screenshot_status_line.configure(text=f"Selected: {item.display_name()} ({item.ip})")
         self._sync_refresh_button_state()
+        self._sync_projection_controls()
         self._set_status(f"Selected {ip}")
 
     def _on_refresh_tooltip_enter(self, event: tk.Event) -> None:
@@ -773,6 +826,184 @@ class ControllerApp:
             self.refresh_button.config(state=tk.DISABLED)
         else:
             self.refresh_button.config(state=tk.NORMAL if can else tk.DISABLED)
+
+    def _sync_projection_controls(self) -> None:
+        if not getattr(self, "project_button", None):
+            return
+        ip = self._selected_ip
+        item = self.items.get(ip) if ip else None
+        can = bool(ip and item and item.api_key)
+        active_here = bool(ip and self.projection_active.get(ip, False))
+        n = sum(1 for v in self.projection_active.values() if v)
+        if n == 0:
+            line = "Projection: idle"
+        elif n == 1 and active_here:
+            line = f"Projection: streaming to {item.display_name() if item else ip}"
+        elif n == 1:
+            only_ip = next(k for k, v in self.projection_active.items() if v)
+            only_item = self.items.get(only_ip)
+            line = f"Projection: streaming to {only_item.display_name() if only_item else only_ip}"
+        else:
+            line = f"Projection: streaming to {n} PCs"
+        try:
+            self.projection_status_label.configure(text=line)
+        except Exception:
+            pass
+        self.project_button.config(state=tk.NORMAL if (can and not active_here) else tk.DISABLED)
+        self.stop_projection_button.config(state=tk.NORMAL if (can and active_here) else tk.DISABLED)
+
+    def get_hostname(self) -> str:
+        try:
+            return socket.gethostname()
+        except Exception:
+            return "host"
+
+    def capture_host_screenshot(self) -> Image.Image:
+        screenshot = pyautogui.screenshot()
+        if screenshot.mode != "RGB":
+            screenshot = screenshot.convert("RGB")
+        mw = int(self.config.projection.get("max_width", 1280))
+        mh = int(self.config.projection.get("max_height", 720))
+        screenshot.thumbnail((max(1, mw), max(1, mh)), Image.Resampling.LANCZOS)
+        return screenshot
+
+    def screenshot_to_base64(self, image: Image.Image) -> str:
+        q = int(self.config.projection.get("jpeg_quality", 50))
+        q = max(1, min(95, q))
+        buf = io.BytesIO()
+        image.save(buf, format="JPEG", quality=q, optimize=True)
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+
+    def start_projection(self, pc_ip: str, api_key: str, hostname: str) -> None:
+        with self.projection_lock:
+            if self.projection_active.get(pc_ip, False):
+                return
+            self.projection_active[pc_ip] = True
+        thr = threading.Thread(
+            target=self._projection_thread,
+            args=(pc_ip, api_key, hostname),
+            daemon=True,
+            name=f"projection-{pc_ip}",
+        )
+        with self.projection_lock:
+            self.projection_threads[pc_ip] = thr
+        thr.start()
+        self.root.after(0, lambda: self._set_status(f"🖥️ Streaming to {hostname}..."))
+        self.root.after(0, self._sync_projection_controls)
+
+    def _projection_thread(self, pc_ip: str, api_key: str, hostname: str) -> None:
+        interval = float(self.config.projection.get("update_interval", 2))
+        auto_stop = bool(self.config.projection.get("auto_stop_on_error", True))
+        try:
+            while self.projection_active.get(pc_ip, False):
+                try:
+                    image = self.capture_host_screenshot()
+                    img_b64 = self.screenshot_to_base64(image)
+                    body = {
+                        "screenshot": img_b64,
+                        "sender_hostname": self.get_hostname(),
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                    resp = self.client.post_project(pc_ip, api_key, body)
+                    if resp.status_code == 401:
+                        raise PermissionError("invalid api key")
+                    if resp.status_code != 200:
+                        detail = ""
+                        try:
+                            js = resp.json()
+                            detail = str(js.get("error") or js)
+                        except Exception:
+                            detail = (resp.text or "")[:200]
+                        raise RuntimeError(f"Agent rejected ({resp.status_code}): {detail}")
+                except PermissionError:
+                    msg = "Authentication failed — check API key"
+                    self.events.put(("projection_error", (pc_ip, hostname, msg)))
+                    self.logger.error("projection auth failed %s", pc_ip)
+                    if auto_stop:
+                        self._projection_fail(pc_ip)
+                    break
+                except (requests.Timeout, requests.ConnectionError) as e:
+                    msg = projection_exception_message(e)
+                    self.events.put(("projection_error", (pc_ip, hostname, msg)))
+                    self.logger.warning("projection network error %s: %s", pc_ip, e)
+                    if auto_stop:
+                        self._projection_fail(pc_ip)
+                    break
+                except Exception as e:
+                    msg = projection_exception_message(e)
+                    if "capture" in str(e).lower() or isinstance(e, OSError):
+                        msg = f"Failed to capture screen: {e}"
+                    self.events.put(("projection_error", (pc_ip, hostname, msg)))
+                    self.logger.error("projection error %s: %s", pc_ip, e, exc_info=True)
+                    if auto_stop:
+                        self._projection_fail(pc_ip)
+                    break
+                time.sleep(max(0.5, interval))
+        finally:
+            with self.projection_lock:
+                self.projection_threads.pop(pc_ip, None)
+                self.projection_active[pc_ip] = False
+            # Do not call tk from this worker thread; main loop processes the queue.
+            self.events.put(("projection_sync_ui", None))
+
+    def _projection_fail(self, pc_ip: str) -> None:
+        with self.projection_lock:
+            self.projection_active[pc_ip] = False
+        item = self.items.get(pc_ip)
+        if item and item.api_key:
+            try:
+                self.client.post_stop_projection(pc_ip, item.api_key)
+            except Exception:
+                pass
+
+    def stop_projection(self, pc_ip: Optional[str] = None, notify_agent: bool = True) -> None:
+        ip = (pc_ip or self._selected_ip or "").strip()
+        if not ip:
+            return
+        with self.projection_lock:
+            self.projection_active[ip] = False
+        item = self.items.get(ip)
+        if notify_agent and item and item.api_key:
+            try:
+                self.client.post_stop_projection(ip, item.api_key)
+            except Exception as e:
+                self.logger.warning("stop_projection post failed for %s: %s", ip, e)
+        self.root.after(0, self._sync_projection_controls)
+
+    def project_screen_click(self) -> None:
+        ip = self._selected_ip
+        if not ip:
+            messagebox.showwarning("No PC Selected", "Please select a PC first.")
+            return
+        item = self.items.get(ip)
+        if not item:
+            return
+        if not item.api_key:
+            messagebox.showerror("Missing API key", "This PC has no API key configured.")
+            return
+        if self.projection_active.get(ip, False):
+            messagebox.showinfo("Already projecting", f"Already streaming to {item.display_name()}.")
+            return
+        if not messagebox.askyesno(
+            "Project Screen",
+            f"Project your screen to {item.display_name()} ({item.ip})?\n\n"
+            "The guest will show your desktop in fullscreen until you stop.",
+        ):
+            return
+        self.start_projection(item.ip, item.api_key, item.display_name())
+
+    def stop_projection_click(self) -> None:
+        ip = self._selected_ip
+        if not ip:
+            messagebox.showwarning("No PC Selected", "Please select a PC first.")
+            return
+        if not self.projection_active.get(ip, False):
+            messagebox.showinfo("Not projecting", "Projection is not active for the selected PC.")
+            return
+        item = self.items.get(ip)
+        name = item.display_name() if item else ip
+        self.stop_projection(pc_ip=ip, notify_agent=True)
+        self._set_status(f"✓ Projection stopped — {name}")
 
     def _reset_screenshot_view(self) -> None:
         self._screenshot_history = []
@@ -943,14 +1174,30 @@ class ControllerApp:
             row=3, column=1, sticky="w", padx=(8, 0), pady=(8, 0)
         )
 
+        ttk.Label(frame, text="Projection interval (1–5s):").grid(row=4, column=0, sticky="w", pady=(8, 0))
+        proj_iv = tk.IntVar(value=int(self.config.projection.get("update_interval", 2)))
+        ttk.Spinbox(frame, from_=1, to=5, textvariable=proj_iv, width=8).grid(row=4, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+
+        ttk.Label(frame, text="Projection JPEG quality (30–95):").grid(row=5, column=0, sticky="w", pady=(8, 0))
+        proj_q = tk.IntVar(value=int(self.config.projection.get("jpeg_quality", 50)))
+        ttk.Spinbox(frame, from_=30, to=95, textvariable=proj_q, width=8).grid(row=5, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+
+        auto_stop_var = tk.BooleanVar(value=bool(self.config.projection.get("auto_stop_on_error", True)))
+        ttk.Checkbutton(frame, text="Stop projection on agent error", variable=auto_stop_var).grid(
+            row=6, column=0, columnspan=2, sticky="w", pady=(10, 0)
+        )
+
         btns = ttk.Frame(frame)
-        btns.grid(row=4, column=0, columnspan=2, sticky="e", pady=(14, 0))
+        btns.grid(row=7, column=0, columnspan=2, sticky="e", pady=(14, 0))
 
         def _apply() -> None:
             self.config.screenshot["refresh_interval"] = max(3, min(30, int(scr_var.get())))
             self.config.auto_detect_interval = int(st_var.get())
             self.config.general["dark_mode"] = bool(dark_var.get())
             self.config.general["log_level"] = str(lvl_var.get())
+            self.config.projection["update_interval"] = max(1, min(5, int(proj_iv.get())))
+            self.config.projection["jpeg_quality"] = max(30, min(95, int(proj_q.get())))
+            self.config.projection["auto_stop_on_error"] = bool(auto_stop_var.get())
             self.save_config()
             self._set_status("Settings saved (restart to apply log level)")
             win.destroy()
@@ -992,6 +1239,13 @@ class ControllerApp:
                 elif kind == "screenshot_manual_done":
                     self._manual_screenshot_busy = False
                     self._sync_refresh_button_state()
+                elif kind == "projection_error":
+                    _, hostname, msg = payload
+                    self._set_status(f"✗ Projection error ({hostname}): {msg}")
+                    self.logger.error("projection failed %s: %s", hostname, msg)
+                    self._sync_projection_controls()
+                elif kind == "projection_sync_ui":
+                    self._sync_projection_controls()
                 elif kind == "scan_result":
                     self._hide_progress()
                     self._scan_in_flight = False
@@ -1166,6 +1420,15 @@ class ControllerApp:
             self.logger.info("controller shutting down")
         except Exception:
             pass
+        for ip in list(self.projection_active.keys()):
+            if self.projection_active.get(ip):
+                self.projection_active[ip] = False
+                it = self.items.get(ip)
+                if it and it.api_key:
+                    try:
+                        self.client.post_stop_projection(ip, it.api_key)
+                    except Exception:
+                        pass
         self.save_config()
         self.stop_event.set()
         self.root.after(150, self.root.destroy)

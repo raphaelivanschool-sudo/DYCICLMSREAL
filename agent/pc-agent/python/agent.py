@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import platform
+import queue
 import subprocess
 import threading
 import time
@@ -23,6 +24,12 @@ from PIL import Image, ImageGrab
 AGENT_VERSION = "1.0"
 
 T = TypeVar("T")
+
+# Host→guest projection fullscreen (Tk on a background thread)
+_projection_queue: "queue.Queue[Optional[bytes]]" = queue.Queue()
+_projection_ui_thread: Optional[threading.Thread] = None
+_projection_lock = threading.Lock()
+_projection_photo_ref: list = []  # keep PhotoImage refs for Tk
 
 
 @dataclass(frozen=True)
@@ -217,6 +224,78 @@ def cancel_shutdown_windows() -> None:
     _run_windows_command(["shutdown", "/a"], timeout_seconds=5.0)
 
 
+def _run_projection_ui(logger: logging.Logger) -> None:
+    """Tk fullscreen loop (must run in its own thread)."""
+    global _projection_ui_thread
+    try:
+        import tkinter as tk
+        from PIL import ImageTk
+    except Exception as e:
+        logger.error("projection UI imports failed: %s", e)
+        return
+
+    root = tk.Tk()
+    root.title("Screen projection")
+    root.configure(bg="black")
+    root.attributes("-fullscreen", True)
+    root.attributes("-topmost", True)
+    lbl = tk.Label(root, bg="black")
+    lbl.pack(fill=tk.BOTH, expand=True)
+
+    def pump() -> None:
+        try:
+            last_frame: Optional[bytes] = None
+            stop_requested = False
+            while True:
+                try:
+                    item = _projection_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if item is None:
+                    stop_requested = True
+                else:
+                    last_frame = item
+            if stop_requested:
+                root.destroy()
+                return
+            if last_frame is None:
+                root.after(120, pump)
+                return
+            img = Image.open(io.BytesIO(last_frame)).convert("RGB")
+            sw = max(1, root.winfo_screenwidth())
+            sh = max(1, root.winfo_screenheight())
+            img = img.resize((sw, sh), Image.Resampling.LANCZOS)
+            hold = ImageTk.PhotoImage(img)
+            _projection_photo_ref.clear()
+            _projection_photo_ref.append(hold)
+            lbl.config(image=hold)
+        except tk.TclError:
+            return
+        except Exception as e:
+            logger.warning("projection frame: %s", e)
+        root.after(120, pump)
+
+    root.after(50, pump)
+    try:
+        root.mainloop()
+    finally:
+        with _projection_lock:
+            _projection_ui_thread = None
+
+
+def _ensure_projection_ui(logger: logging.Logger) -> None:
+    global _projection_ui_thread
+    with _projection_lock:
+        if _projection_ui_thread is not None and _projection_ui_thread.is_alive():
+            return
+        _projection_ui_thread = threading.Thread(
+            target=lambda: _run_projection_ui(logger),
+            name="projection-ui",
+            daemon=True,
+        )
+        _projection_ui_thread.start()
+
+
 def create_app(config: AgentConfig, logger: logging.Logger) -> Flask:
     app = Flask(__name__)
     auth_required = require_auth(config)
@@ -326,6 +405,47 @@ def create_app(config: AgentConfig, logger: logging.Logger) -> Flask:
         except Exception as e:
             logger.error("cancel shutdown failed: %s\n%s", e, traceback.format_exc())
             return jsonify({"error": "No shutdown to cancel"}), 500
+
+    @app.post("/project")
+    @auth_required
+    def project_screen() -> Tuple[Response, int]:
+        """Receive a JPEG screenshot from the instructor host and show it fullscreen."""
+        try:
+            body: Dict[str, Any] = {}
+            if request.data:
+                body = request.get_json(force=True, silent=True) or {}
+            b64 = body.get("screenshot") or ""
+            if not b64:
+                return jsonify({"error": "screenshot required"}), 400
+            try:
+                raw = base64.b64decode(b64)
+            except Exception:
+                return jsonify({"error": "invalid base64"}), 400
+            if len(raw) < 100:
+                return jsonify({"error": "screenshot payload too small"}), 400
+            _ensure_projection_ui(logger)
+            try:
+                while True:
+                    _projection_queue.get_nowait()
+            except queue.Empty:
+                pass
+            _projection_queue.put(raw)
+            logger.info("projection frame queued bytes=%s", len(raw))
+            return jsonify({"status": "ok"}), 200
+        except Exception as e:
+            logger.error("project failed: %s\n%s", e, traceback.format_exc())
+            return jsonify({"error": "projection failed"}), 500
+
+    @app.post("/stop_projection")
+    @auth_required
+    def stop_projection_ep() -> Tuple[Response, int]:
+        try:
+            _projection_queue.put(None)
+            logger.info("projection stop requested")
+            return jsonify({"status": "stopped"}), 200
+        except Exception as e:
+            logger.error("stop_projection failed: %s\n%s", e, traceback.format_exc())
+            return jsonify({"error": "stop failed"}), 500
 
     return app
 

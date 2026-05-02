@@ -1,8 +1,9 @@
 import { Router } from 'express';
 import { PrismaClient } from '@prisma/client';
 import dgram from 'dgram';
+import axios from 'axios';
 import { authenticateToken } from '../middleware/auth.js';
-import { pickAgentTargetId } from '../utils/agentLookup.js';
+import { pickAgentTargetId, resolveLanIpForPcAgent } from '../utils/agentLookup.js';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -308,7 +309,177 @@ router.post('/command', authenticateToken, (req, res) => {
   }
 });
 
-// POST /api/agents/installer - Generate agent installer configuration
+const PC_AGENT_PORT = parseInt(process.env.PC_AGENT_HTTP_PORT || '5555', 10);
+const PC_AGENT_API_KEY = process.env.PC_AGENT_API_KEY || '';
+
+/** Forward host screen frame to guest PC Flask agent (Python /project). */
+router.post('/projection/frame', authenticateToken, async (req, res) => {
+  try {
+    if (!PC_AGENT_API_KEY) {
+      return res.status(503).json({
+        success: false,
+        error:
+          'Server missing PC_AGENT_API_KEY — set it in server/.env to match guest agent_config.json api_key',
+      });
+    }
+
+    const connectedComputers = req.app.get('connectedComputers');
+    const { computerId, ip, mac, screenshot, sender_hostname, timestamp } = req.body || {};
+
+    if (!screenshot || typeof screenshot !== 'string') {
+      return res.status(400).json({ success: false, error: 'screenshot (base64 JPEG) is required' });
+    }
+
+    const { targetId, strategy } = pickAgentTargetId(connectedComputers, {
+      computerId,
+      ip,
+      mac,
+    });
+
+    if (!targetId) {
+      return res.status(404).json({
+        success: false,
+        error:
+          'No online agent matches this PC. Select a row that maps to a connected agent.',
+      });
+    }
+
+    const lanIp = resolveLanIpForPcAgent(connectedComputers, targetId, ip);
+    if (!lanIp) {
+      return res.status(400).json({
+        success: false,
+        error: 'Could not resolve LAN IP for the guest agent (enable discovery IP or fix agent registration).',
+      });
+    }
+
+    const url = `http://${lanIp}:${PC_AGENT_PORT}/project`;
+    let guestResp;
+    try {
+      guestResp = await axios.post(
+        url,
+        {
+          screenshot,
+          sender_hostname: sender_hostname || 'browser-host',
+          timestamp: timestamp || new Date().toISOString(),
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${PC_AGENT_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: 15000,
+          validateStatus: () => true,
+        },
+      );
+    } catch (e) {
+      const msg =
+        e.code === 'ECONNREFUSED'
+          ? `Nothing listening on ${lanIp}:${PC_AGENT_PORT} — run the Python PC agent on the guest.`
+          : e.message || 'Forward failed';
+      return res.status(502).json({ success: false, error: msg });
+    }
+
+    if (guestResp.status !== 200) {
+      const detail =
+        typeof guestResp.data === 'object' && guestResp.data?.error
+          ? guestResp.data.error
+          : guestResp.statusText || String(guestResp.status);
+      return res.status(502).json({
+        success: false,
+        error: `Guest agent HTTP ${guestResp.status}: ${detail}`,
+      });
+    }
+
+    return res.json({
+      success: true,
+      resolvedComputerId: targetId,
+      resolutionStrategy: strategy,
+      forwardedTo: url,
+    });
+  } catch (error) {
+    console.error('[agents/projection/frame]', error);
+    res.status(500).json({ success: false, error: 'Projection forward failed' });
+  }
+});
+
+/** Ask guest Flask agent to close fullscreen projection. */
+router.post('/projection/stop', authenticateToken, async (req, res) => {
+  try {
+    if (!PC_AGENT_API_KEY) {
+      return res.status(503).json({
+        success: false,
+        error:
+          'Server missing PC_AGENT_API_KEY — set it in server/.env to match guest agent_config.json api_key',
+      });
+    }
+
+    const connectedComputers = req.app.get('connectedComputers');
+    const { computerId, ip, mac } = req.body || {};
+
+    const { targetId, strategy } = pickAgentTargetId(connectedComputers, {
+      computerId,
+      ip,
+      mac,
+    });
+
+    if (!targetId) {
+      return res.status(404).json({
+        success: false,
+        error: 'No online agent matches this PC.',
+      });
+    }
+
+    const lanIp = resolveLanIpForPcAgent(connectedComputers, targetId, ip);
+    if (!lanIp) {
+      return res.status(400).json({
+        success: false,
+        error: 'Could not resolve LAN IP for the guest agent.',
+      });
+    }
+
+    const url = `http://${lanIp}:${PC_AGENT_PORT}/stop_projection`;
+    try {
+      const guestResp = await axios.post(
+        url,
+        {},
+        {
+          headers: {
+            Authorization: `Bearer ${PC_AGENT_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: 10000,
+          validateStatus: () => true,
+        },
+      );
+      if (guestResp.status !== 200) {
+        const detail =
+          typeof guestResp.data === 'object' && guestResp.data?.error
+            ? guestResp.data.error
+            : guestResp.statusText || String(guestResp.status);
+        return res.status(502).json({
+          success: false,
+          error: `Guest agent HTTP ${guestResp.status}: ${detail}`,
+        });
+      }
+      return res.json({
+        success: true,
+        resolvedComputerId: targetId,
+        resolutionStrategy: strategy,
+        forwardedTo: url,
+      });
+    } catch (e) {
+      const msg =
+        e.code === 'ECONNREFUSED'
+          ? `Nothing listening on ${lanIp}:${PC_AGENT_PORT}`
+          : e.message || 'Forward failed';
+      return res.status(502).json({ success: false, error: msg });
+    }
+  } catch (error) {
+    console.error('[agents/projection/stop]', error);
+    res.status(500).json({ success: false, error: 'Stop projection failed' });
+  }
+});
+
 router.post('/installer', authenticateToken, async (req, res) => {
   try {
     const { room, serverUrl, computerName } = req.body;

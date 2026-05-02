@@ -6,6 +6,24 @@ import socketService from '../../services/socketService.js';
 
 const RESULT_TIMEOUT_MS = 90000;
 const SCREENSHOT_AUTO_MS = 3000;
+const PROJECTION_INTERVAL_MS = 2000;
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const s = reader.result;
+      if (typeof s === 'string') {
+        const idx = s.indexOf(',');
+        resolve(idx >= 0 ? s.slice(idx + 1) : s);
+      } else {
+        reject(new Error('Invalid read result'));
+      }
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
 
 /** Attach agent UUID to scan/broadcast rows when an online agent reports the same LAN IP (or ipAddresses). */
 function mergeAgentIdsOntoScanRows(prevByIp, connectedDevices) {
@@ -50,6 +68,11 @@ function DeveloperModePage() {
   const [screenshotStatus, setScreenshotStatus] = useState('');
   const [screenshotFetching, setScreenshotFetching] = useState(false);
   const [autoRefreshScreenshot, setAutoRefreshScreenshot] = useState(false);
+  const [projectionActive, setProjectionActive] = useState(false);
+  const [projectionStatus, setProjectionStatus] = useState('');
+  const projectionRunningRef = useRef(false);
+  const projectionIntervalRef = useRef(null);
+  const projectionStreamRef = useRef(null);
   const selectedAgentIdRef = useRef(null);
   const commandTargetComputerIdRef = useRef(null);
   const pendingScreenshotCommandRef = useRef(false);
@@ -213,6 +236,161 @@ function DeveloperModePage() {
     const id = window.setInterval(tick, SCREENSHOT_AUTO_MS);
     return () => window.clearInterval(id);
   }, [autoRefreshScreenshot, selectedDevice?.ip, requestScreenshot]);
+
+  const stopHostProjection = useCallback(
+    async ({ silent = false } = {}) => {
+      projectionRunningRef.current = false;
+      if (projectionIntervalRef.current != null) {
+        window.clearInterval(projectionIntervalRef.current);
+        projectionIntervalRef.current = null;
+      }
+      const pack = projectionStreamRef.current;
+      projectionStreamRef.current = null;
+      if (pack?.stream) {
+        pack.stream.getTracks().forEach((t) => t.stop());
+      }
+      setProjectionActive(false);
+
+      const agentId = selectedDevice?.agentId;
+      const ip = selectedDevice?.ip;
+      const mac = selectedDevice?.mac;
+      if (!ip) {
+        if (!silent) setProjectionStatus('');
+        return;
+      }
+      try {
+        await agentsApi.stopProjectionHttp(agentId, { ip, mac });
+        if (!silent) setProjectionStatus('✓ Projection stopped on guest');
+      } catch (e) {
+        const msg = e.response?.data?.error || e.message || 'Stop failed';
+        if (!silent) setProjectionStatus(`✗ Stop: ${msg}`);
+      }
+    },
+    [selectedDevice?.agentId, selectedDevice?.ip, selectedDevice?.mac]
+  );
+
+  const startHostProjection = useCallback(async () => {
+    if (!selectedDevice?.ip) {
+      setProjectionStatus('✗ Select a PC with an IP first.');
+      return;
+    }
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      setProjectionStatus('✗ Screen capture is not supported in this browser.');
+      return;
+    }
+    if (projectionRunningRef.current) {
+      setProjectionStatus('✗ Projection already running.');
+      return;
+    }
+    const confirmed = window.confirm(
+      'Project your shared screen onto the selected guest PC?\n\n' +
+        'You will pick which display/window to share.\n' +
+        'The server forwards frames to the guest Python agent (HTTP port 5555). ' +
+        'Set PC_AGENT_API_KEY in server/.env to match the guest agent_config.json api_key.'
+    );
+    if (!confirmed) return;
+
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: 5 },
+        audio: false,
+      });
+    } catch (e) {
+      setProjectionStatus(`✗ Screen share cancelled or denied: ${e?.message || e}`);
+      return;
+    }
+
+    const video = document.createElement('video');
+    video.playsInline = true;
+    video.muted = true;
+    video.srcObject = stream;
+    try {
+      await video.play();
+    } catch (e) {
+      stream.getTracks().forEach((t) => t.stop());
+      setProjectionStatus(`✗ Could not start capture: ${e?.message || e}`);
+      return;
+    }
+
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    projectionStreamRef.current = { stream, video, canvas, ctx };
+    projectionRunningRef.current = true;
+    setProjectionActive(true);
+    setProjectionStatus('🖥️ Streaming…');
+
+    const agentId = selectedDevice?.agentId;
+    const ip = selectedDevice?.ip;
+    const mac = selectedDevice?.mac;
+
+    const sendFrame = async () => {
+      if (!projectionRunningRef.current || !projectionStreamRef.current) return;
+      const { video: v, canvas: c, ctx: cctx } = projectionStreamRef.current;
+      const vw = v.videoWidth;
+      const vh = v.videoHeight;
+      if (!vw || !vh) return;
+      const maxW = 1280;
+      const maxH = 720;
+      let tw = vw;
+      let th = vh;
+      if (tw > maxW || th > maxH) {
+        const scale = Math.min(maxW / tw, maxH / th);
+        tw = Math.round(tw * scale);
+        th = Math.round(th * scale);
+      }
+      c.width = tw;
+      c.height = th;
+      cctx.drawImage(v, 0, 0, tw, th);
+      const blob = await new Promise((res) => c.toBlob(res, 'image/jpeg', 0.52));
+      if (!blob || !projectionRunningRef.current) return;
+      const b64 = await blobToBase64(blob);
+      await agentsApi.sendProjectionFrame(
+        agentId,
+        {
+          screenshot: b64,
+          sender_hostname: typeof window !== 'undefined' ? window.location.hostname || 'browser' : 'browser',
+          timestamp: new Date().toISOString(),
+        },
+        { ip, mac }
+      );
+    };
+
+    try {
+      await sendFrame();
+    } catch (e) {
+      const msg = e.response?.data?.error || e.message || 'Send failed';
+      setProjectionStatus(`✗ ${msg}`);
+      await stopHostProjection({ silent: true });
+      return;
+    }
+
+    projectionIntervalRef.current = window.setInterval(() => {
+      sendFrame().catch((e) => {
+        const msg = e.response?.data?.error || e.message || 'Send failed';
+        setProjectionStatus(`✗ ${msg}`);
+      });
+    }, PROJECTION_INTERVAL_MS);
+
+    const track = stream.getVideoTracks()[0];
+    track?.addEventListener('ended', () => {
+      stopHostProjection({ silent: false });
+    });
+  }, [selectedDevice?.agentId, selectedDevice?.ip, selectedDevice?.mac, stopHostProjection]);
+
+  useEffect(() => {
+    return () => {
+      projectionRunningRef.current = false;
+      if (projectionIntervalRef.current != null) {
+        window.clearInterval(projectionIntervalRef.current);
+        projectionIntervalRef.current = null;
+      }
+      const pack = projectionStreamRef.current;
+      if (pack?.stream) {
+        pack.stream.getTracks().forEach((t) => t.stop());
+      }
+    };
+  }, []);
 
   const runDiscovery = async () => {
     setDiscovering(true);
@@ -514,6 +692,22 @@ function DeveloperModePage() {
                   />
                   Auto-refresh ({SCREENSHOT_AUTO_MS / 1000}s)
                 </label>
+                <button
+                  type="button"
+                  onClick={startHostProjection}
+                  disabled={!selectedDevice?.ip || projectionActive}
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm text-white bg-violet-600 hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  🖥️ Project my screen
+                </button>
+                <button
+                  type="button"
+                  onClick={() => stopHostProjection({ silent: false })}
+                  disabled={!projectionActive}
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm text-white bg-gray-700 hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  ⏹️ Stop projection
+                </button>
               </div>
             </div>
 
@@ -537,6 +731,22 @@ function DeveloperModePage() {
                 {screenshotStatus}
               </p>
             )}
+            {projectionStatus && (
+              <p
+                className={`text-sm ${
+                  projectionStatus.startsWith('✗') ? 'text-red-700' : 'text-violet-900'
+                }`}
+              >
+                {projectionStatus}
+              </p>
+            )}
+            <p className="text-xs text-gray-500 max-w-3xl">
+              Host→guest projection uses the Lab Management API to reach each guest&apos;s Python agent on TCP{' '}
+              <strong>5555</strong>. Set <code className="bg-gray-100 px-1 rounded">PC_AGENT_API_KEY</code> in{' '}
+              <code className="bg-gray-100 px-1 rounded">server/.env</code> to the same value as{' '}
+              <code className="bg-gray-100 px-1 rounded">api_key</code> in the guest&apos;s{' '}
+              <code className="bg-gray-100 px-1 rounded">agent_config.json</code>.
+            </p>
           </div>
         ) : null}
       </div>

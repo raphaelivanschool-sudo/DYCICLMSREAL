@@ -102,3 +102,28 @@ export function pickAgentTargetId(connectedComputers, { computerId, ip, mac }) {
 
   return { targetId: null, strategy: null };
 }
+
+/**
+ * Choose the LAN IP used to reach the PC agent HTTP API (Flask on port 5555).
+ * Prefer the discovery-row IP from the dashboard when it is not loopback.
+ */
+export function resolveLanIpForPcAgent(connectedComputers, targetId, hintIp) {
+  if (!targetId || !connectedComputers?.has(targetId)) {
+    return null;
+  }
+  const hint = normalizeIp(hintIp || "");
+  if (hint && hint !== "127.0.0.1" && hint !== "::1") {
+    return hint;
+  }
+  const entry = connectedComputers.get(targetId);
+  const c = entry?.computer || {};
+  const ips = [...collectIpsFromComputer(c)];
+  const lan = ips.find(
+    (i) =>
+      i &&
+      !i.startsWith("127.") &&
+      !i.startsWith("::1") &&
+      !i.startsWith("169.254."),
+  );
+  return lan || ips[0] || null;
+}

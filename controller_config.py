@@ -59,6 +59,15 @@ class ControllerConfig:
             "max_height": 720,
         }
     )
+    projection: Dict[str, Any] = field(
+        default_factory=lambda: {
+            "update_interval": 2,
+            "jpeg_quality": 50,
+            "max_width": 1280,
+            "max_height": 720,
+            "auto_stop_on_error": True,
+        }
+    )
     auto_detect_interval: int = 30
     known_pcs: List[KnownPC] = field(default_factory=list)
     general: Dict[str, Any] = field(default_factory=lambda: {"dark_mode": False, "log_level": "INFO"})
@@ -87,6 +96,11 @@ class ControllerConfig:
                 merged = dict(cfg.screenshot)
                 merged.update(scr)
                 cfg.screenshot = merged
+            proj = raw.get("projection")
+            if isinstance(proj, dict):
+                merged_p = dict(cfg.projection)
+                merged_p.update(proj)
+                cfg.projection = merged_p
             legacy_iv = raw.get("screenshot_interval")
             if legacy_iv is not None:
                 cfg.screenshot["refresh_interval"] = int(legacy_iv)
@@ -101,6 +115,10 @@ class ControllerConfig:
         cfg.screenshot["refresh_interval"] = max(3, min(30, int(cfg.screenshot.get("refresh_interval", 5))))
         cfg.screenshot["max_width"] = max(320, min(3840, int(cfg.screenshot.get("max_width", 1280))))
         cfg.screenshot["max_height"] = max(240, min(2160, int(cfg.screenshot.get("max_height", 720))))
+        cfg.projection["update_interval"] = max(1, min(5, int(cfg.projection.get("update_interval", 2))))
+        cfg.projection["jpeg_quality"] = max(30, min(95, int(cfg.projection.get("jpeg_quality", 50))))
+        cfg.projection["max_width"] = max(320, min(3840, int(cfg.projection.get("max_width", 1280))))
+        cfg.projection["max_height"] = max(240, min(2160, int(cfg.projection.get("max_height", 720))))
         cfg.auto_detect_interval = max(10, min(300, int(cfg.auto_detect_interval)))
         return cfg
 
@@ -109,6 +127,7 @@ class ControllerConfig:
             "window": self.window,
             "screenshot_interval": int(self.screenshot.get("refresh_interval", 5)),
             "screenshot": dict(self.screenshot),
+            "projection": dict(self.projection),
             "auto_detect_interval": int(self.auto_detect_interval),
             "known_pcs": [pc.to_dict() for pc in self.known_pcs],
             "general": self.general,
