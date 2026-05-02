@@ -1,5 +1,6 @@
 const io = require('socket.io-client');
 const si = require('systeminformation');
+const screenshotDesktop = require('screenshot-desktop');
 const os = require('os');
 const { exec } = require('child_process');
 const path = require('path');
@@ -279,9 +280,12 @@ async function executeCommand(command) {
       case 'enable_wifi':
         result = await enableWifiAdapter(params?.adapterName);
         break;
+      case 'screenshot':
+        result = await takeScreenshot();
+        break;
       default:
         console.log(`Unknown command: ${action}`);
-        result = { warning: `Unknown command: ${action}` };
+        throw new Error(`Unknown command: ${action}`);
     }
 
     socket.emit('command_result', {
@@ -447,6 +451,21 @@ async function enableWifiAdapter(preferredAdapterName) {
     enabled: true,
     adapter: adapterName,
     message: `Enabled Wi-Fi adapter: ${adapterName}`
+  };
+}
+
+/** Capture desktop as PNG for dashboard screen preview (matches agent/pc-agent contract). */
+async function takeScreenshot() {
+  const imgBuffer = await screenshotDesktop();
+  if (!imgBuffer || !imgBuffer.length) {
+    throw new Error('Empty screenshot capture');
+  }
+  const base64 = Buffer.from(imgBuffer).toString('base64');
+  return {
+    success: true,
+    screenshot: base64,
+    format: 'png',
+    timestamp: new Date().toISOString(),
   };
 }
 
