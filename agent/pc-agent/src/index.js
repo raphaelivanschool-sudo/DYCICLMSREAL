@@ -141,13 +141,45 @@ class PCAgent {
         return 100;
       };
 
-      const uniqueIps = [...new Set(ipv4Candidates.map((c) => c.ip))].sort(
-        (x, y) => scoreIp(y) - scoreIp(x)
-      );
+      const osCandidates = [];
+      try {
+        const nics = os.networkInterfaces();
+        for (const name of Object.keys(nics)) {
+          for (const addr of nics[name] || []) {
+            const fam = addr.family;
+            const isV4 = fam === 'IPv4' || fam === 4;
+            if (!isV4 || !addr.address) continue;
+            const a = String(addr.address).trim();
+            if (!a || a.startsWith('127.') || addr.internal) continue;
+            osCandidates.push({
+              ip: a,
+              mac: (addr.mac || '00:00:00:00:00:00').replace(/-/g, ':'),
+            });
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+
+      const byIp = new Map();
+      for (const c of ipv4Candidates) byIp.set(c.ip, c);
+      for (const c of osCandidates) {
+        if (!byIp.has(c.ip)) byIp.set(c.ip, c);
+      }
+      const candidates = [...byIp.values()];
+
+      const uniqueIps = [...new Set(candidates.map((c) => c.ip))]
+        .filter((x) => x && !String(x).startsWith('127.'))
+        .sort((x, y) => scoreIp(y) - scoreIp(x));
 
       const ip = uniqueIps[0] || '0.0.0.0';
-      const primaryNi = ipv4Candidates.find((c) => c.ip === ip) || ipv4Candidates[0];
+      const primaryNi = candidates.find((c) => c.ip === ip) || candidates[0];
       const mac = primaryNi?.mac || '00:00:00:00:00:00';
+
+      const interfaceBindings = candidates.map((c) => ({
+        ip: c.ip,
+        mac: c.mac || '00:00:00:00:00:00',
+      }));
 
       // Get current logged-in user
       const currentUser = users.find(u => u.loggedIn) || users[0] || { user: os.userInfo().username };
@@ -162,6 +194,7 @@ class PCAgent {
         room: this.config.room,
         status: 'online',
         ipAddresses: uniqueIps.length ? uniqueIps : ip !== '0.0.0.0' ? [ip] : [],
+        interfaceBindings,
         os: `${osInfo.platform} ${osInfo.release}`,
         specs: {
           cpu: `${cpu.manufacturer} ${cpu.brand}`,
@@ -182,6 +215,7 @@ class PCAgent {
         ip: '0.0.0.0',
         mac: '00:00:00:00:00:00',
         ipAddresses: [],
+        interfaceBindings: [],
         user: os.userInfo().username,
         room: this.config.room,
         status: 'online',
@@ -356,7 +390,18 @@ class PCAgent {
       // Register this computer
       const computerData = await this.getSystemInfo();
       this.socket.emit('agent_register', computerData);
-      
+      this.socket.emit('agent_status_update', {
+        computerId: this.config.computerId,
+        status: 'online',
+        user: computerData.user,
+        ip: computerData.ip,
+        mac: computerData.mac,
+        ipAddresses: computerData.ipAddresses,
+        interfaceBindings: computerData.interfaceBindings,
+        hostname: computerData.hostname,
+        timestamp: new Date(),
+      });
+
       // Start heartbeat
       this.startHeartbeat();
       
@@ -411,7 +456,12 @@ class PCAgent {
             computerId: this.config.computerId,
             status: 'online',
             user: status.user,
-            timestamp: new Date()
+            ip: status.ip,
+            mac: status.mac,
+            ipAddresses: status.ipAddresses,
+            interfaceBindings: status.interfaceBindings,
+            hostname: status.hostname,
+            timestamp: new Date(),
           });
           this.logger.debug('Heartbeat sent');
         } catch (error) {

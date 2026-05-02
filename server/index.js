@@ -204,7 +204,19 @@ io.on("connection", (socket) => {
         computer.lastSeen = new Date();
         computer.status = statusData.status;
         computer.user = statusData.user;
-        
+
+        const c = computer.computer;
+        if (c && typeof c === "object") {
+          if (statusData.user != null) c.user = statusData.user;
+          if (statusData.ip) c.ip = statusData.ip;
+          if (statusData.mac) c.mac = statusData.mac;
+          if (Array.isArray(statusData.ipAddresses)) c.ipAddresses = statusData.ipAddresses;
+          if (Array.isArray(statusData.interfaceBindings)) {
+            c.interfaceBindings = statusData.interfaceBindings;
+          }
+          if (statusData.hostname) c.hostname = statusData.hostname;
+        }
+
         // Broadcast status update to instructors
         socket.broadcast.emit("computer_status_update", {
           computerId: statusData.computerId,

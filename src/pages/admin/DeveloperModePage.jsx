@@ -15,7 +15,11 @@ function mergeAgentIdsOntoScanRows(prevByIp, connectedDevices) {
     const row = next[ip];
     if (row.agentId) continue;
     const match = connectedDevices.find((d) => {
-      const ips = [d.ip, ...(Array.isArray(d.ipAddresses) ? d.ipAddresses : [])].filter(Boolean);
+      const ips = [
+        d.ip,
+        ...(Array.isArray(d.ipAddresses) ? d.ipAddresses : []),
+        ...(Array.isArray(d.interfaceBindings) ? d.interfaceBindings.map((b) => b?.ip).filter(Boolean) : []),
+      ].filter(Boolean);
       return ips.some((a) => String(a) === String(ip));
     });
     if (match?.id) {
@@ -235,7 +239,13 @@ function DeveloperModePage() {
             if (!device?.id) return;
             const ips = [
               ...new Set(
-                [device.ip, ...(Array.isArray(device.ipAddresses) ? device.ipAddresses : [])].filter(Boolean)
+                [
+                  device.ip,
+                  ...(Array.isArray(device.ipAddresses) ? device.ipAddresses : []),
+                  ...(Array.isArray(device.interfaceBindings)
+                    ? device.interfaceBindings.map((b) => b?.ip).filter(Boolean)
+                    : []),
+                ].filter(Boolean)
               ),
             ];
             ips.forEach((dip) => {

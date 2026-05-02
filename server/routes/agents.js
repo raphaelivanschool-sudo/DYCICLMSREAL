@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { PrismaClient } from '@prisma/client';
 import dgram from 'dgram';
 import { authenticateToken } from '../middleware/auth.js';
-import { resolveComputerIdFromConnectedAgents } from '../utils/agentLookup.js';
+import { pickAgentTargetId } from '../utils/agentLookup.js';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -187,6 +187,7 @@ router.get('/connected', authenticateToken, (req, res) => {
         ip: c.ip,
         mac: c.mac,
         ipAddresses: Array.isArray(c.ipAddresses) ? c.ipAddresses : [],
+        interfaceBindings: Array.isArray(c.interfaceBindings) ? c.interfaceBindings : [],
         user: computerData.user || c.user,
         status: computerData.status || 'online',
         os: c.platform || c.distro || c.os || 'Windows',
@@ -234,6 +235,7 @@ router.get('/connected/:computerId', authenticateToken, (req, res) => {
         ip: c.ip,
         mac: c.mac,
         ipAddresses: Array.isArray(c.ipAddresses) ? c.ipAddresses : [],
+        interfaceBindings: Array.isArray(c.interfaceBindings) ? c.interfaceBindings : [],
         user: computerData.user || c.user,
         status: computerData.status || 'online',
         os: c.platform || c.distro || c.os || 'Windows',
@@ -264,16 +266,24 @@ router.post('/command', authenticateToken, (req, res) => {
       });
     }
 
-    let targetId =
-      computerId ||
-      resolveComputerIdFromConnectedAgents(connectedComputers, { ip, mac });
+    const { targetId, strategy } = pickAgentTargetId(connectedComputers, {
+      computerId,
+      ip,
+      mac,
+    });
 
     if (!targetId) {
       return res.status(404).json({
         success: false,
         error:
-          'No online agent matches this PC. Ensure the DYCI agent is running and try the LAN IP shown in Agent discovery (not only a scan-only row).',
+          'No online agent matches this PC. Ensure the DYCI agent is running and connected to this server.',
       });
+    }
+
+    if (process.env.NODE_ENV !== 'production' && strategy === 'single-session-fallback') {
+      console.warn(
+        '[agents/command] Using single-session fallback (one agent online; discovery IP/MAC did not match registration).'
+      );
     }
 
     io.to(`computer_${targetId}`).emit('execute_command', {
@@ -287,6 +297,7 @@ router.post('/command', authenticateToken, (req, res) => {
       success: true,
       message: `Command ${action} sent to computer ${targetId}`,
       resolvedComputerId: targetId,
+      resolutionStrategy: strategy,
     });
   } catch (error) {
     console.error('Error sending command to agent:', error);
