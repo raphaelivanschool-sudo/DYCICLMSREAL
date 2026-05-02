@@ -741,11 +741,12 @@ function DeveloperModePage() {
               </p>
             )}
             <p className="text-xs text-gray-500 max-w-3xl">
-              Host→guest projection uses the Lab Management API to reach each guest&apos;s Python agent on TCP{' '}
-              <strong>5555</strong>. Set <code className="bg-gray-100 px-1 rounded">PC_AGENT_API_KEY</code> in{' '}
-              <code className="bg-gray-100 px-1 rounded">server/.env</code> to the same value as{' '}
-              <code className="bg-gray-100 px-1 rounded">api_key</code> in the guest&apos;s{' '}
-              <code className="bg-gray-100 px-1 rounded">agent_config.json</code>.
+              Host→guest projection forwards JPEG frames to each guest&apos;s <strong>Python</strong> agent on TCP{' '}
+              <strong>5555</strong>. The API server loads <code className="bg-gray-100 px-1 rounded">api_key</code> from{' '}
+              <code className="bg-gray-100 px-1 rounded">agent/pc-agent/python/agent_config.json</code> when{' '}
+              <code className="bg-gray-100 px-1 rounded">PC_AGENT_API_KEY</code> is not set — use the{' '}
+              <strong>same</strong> key on the guest PC. Override with <code className="bg-gray-100 px-1 rounded">PC_AGENT_API_KEY</code> in{' '}
+              <code className="bg-gray-100 px-1 rounded">server/.env</code> if the guest uses a different file.
             </p>
           </div>
         ) : null}

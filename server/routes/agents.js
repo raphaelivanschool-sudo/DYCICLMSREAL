@@ -4,6 +4,10 @@ import dgram from 'dgram';
 import axios from 'axios';
 import { authenticateToken } from '../middleware/auth.js';
 import { pickAgentTargetId, resolveLanIpForPcAgent } from '../utils/agentLookup.js';
+import {
+  getPcAgentApiKey,
+  getPcAgentConfigPathTried,
+} from '../utils/pcAgentAuth.js';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -310,16 +314,18 @@ router.post('/command', authenticateToken, (req, res) => {
 });
 
 const PC_AGENT_PORT = parseInt(process.env.PC_AGENT_HTTP_PORT || '5555', 10);
-const PC_AGENT_API_KEY = process.env.PC_AGENT_API_KEY || '';
 
 /** Forward host screen frame to guest PC Flask agent (Python /project). */
 router.post('/projection/frame', authenticateToken, async (req, res) => {
   try {
-    if (!PC_AGENT_API_KEY) {
+    const apiKey = getPcAgentApiKey();
+    if (!apiKey) {
       return res.status(503).json({
         success: false,
         error:
-          'Server missing PC_AGENT_API_KEY — set it in server/.env to match guest agent_config.json api_key',
+          `Python agent API key not configured. Set PC_AGENT_API_KEY in server/.env, ` +
+            `or PC_AGENT_CONFIG_PATH to agent_config.json, or place agent_config.json at ${getPcAgentConfigPathTried()} ` +
+            `(api_key must match the guest PC Python agent).`,
       });
     }
 
@@ -364,7 +370,7 @@ router.post('/projection/frame', authenticateToken, async (req, res) => {
         },
         {
           headers: {
-            Authorization: `Bearer ${PC_AGENT_API_KEY}`,
+            Authorization: `Bearer ${apiKey}`,
             'Content-Type': 'application/json',
           },
           timeout: 15000,
@@ -405,11 +411,12 @@ router.post('/projection/frame', authenticateToken, async (req, res) => {
 /** Ask guest Flask agent to close fullscreen projection. */
 router.post('/projection/stop', authenticateToken, async (req, res) => {
   try {
-    if (!PC_AGENT_API_KEY) {
+    const apiKey = getPcAgentApiKey();
+    if (!apiKey) {
       return res.status(503).json({
         success: false,
         error:
-          'Server missing PC_AGENT_API_KEY — set it in server/.env to match guest agent_config.json api_key',
+          `Python agent API key not configured. Set PC_AGENT_API_KEY or sync agent_config.json (see ${getPcAgentConfigPathTried()}).`,
       });
     }
 
@@ -444,7 +451,7 @@ router.post('/projection/stop', authenticateToken, async (req, res) => {
         {},
         {
           headers: {
-            Authorization: `Bearer ${PC_AGENT_API_KEY}`,
+            Authorization: `Bearer ${apiKey}`,
             'Content-Type': 'application/json',
           },
           timeout: 10000,
