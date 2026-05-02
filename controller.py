@@ -27,6 +27,45 @@ STATUS_TIMEOUT_S = 2.0
 SCREENSHOT_TIMEOUT_S = 5.0
 
 
+def decode_screenshot_payload(payload: Dict[str, Any], max_size: Tuple[int, int]) -> Image.Image:
+    """Decode agent JSON payload to a PIL image, downscaled to max_size (preserving aspect ratio)."""
+    if not isinstance(payload, dict):
+        raise ValueError("Invalid response from agent")
+    b64 = str(payload.get("screenshot") or "")
+    if not b64:
+        raise ValueError("missing screenshot field")
+    try:
+        raw = base64.b64decode(b64)
+    except Exception as e:
+        raise ValueError("Failed to decode image data") from e
+    try:
+        img = Image.open(io.BytesIO(raw)).convert("RGB")
+    except Exception as e:
+        raise ValueError("Failed to decode image") from e
+    mx, my = max_size
+    img.thumbnail((max(1, mx), max(1, my)), Image.Resampling.LANCZOS)
+    return img
+
+
+def screenshot_exception_message(exc: Exception) -> str:
+    if isinstance(exc, PermissionError):
+        return "Authentication failed — check API key"
+    if isinstance(exc, requests.Timeout):
+        return "PC not responding — network issue"
+    if isinstance(exc, requests.ConnectionError):
+        return "PC unreachable — check that the agent is running"
+    if isinstance(exc, requests.HTTPError):
+        code = exc.response.status_code if exc.response is not None else 0
+        if code == 401:
+            return "Authentication failed — check API key"
+        return f"Server error ({code})"
+    if isinstance(exc, json.JSONDecodeError):
+        return "Invalid response from agent"
+    if isinstance(exc, ValueError):
+        return str(exc)
+    return "Could not fetch screenshot"
+
+
 def _now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -259,13 +298,17 @@ class StatusChecker(threading.Thread):
 
 
 class ScreenshotFetcher(threading.Thread):
+    """Background auto-refresh when enabled; silent failures (logged only)."""
+
     def __init__(
         self,
         stop_event: threading.Event,
         client: AgentClient,
         selected_ip_getter,
         items_ref: Dict[str, PCListItem],
-        interval_s: float,
+        enabled_getter,
+        interval_getter,
+        max_size_getter,
         out_queue: "queue.Queue[Tuple[str, Any]]",
         logger: logging.Logger,
     ) -> None:
@@ -274,32 +317,35 @@ class ScreenshotFetcher(threading.Thread):
         self.client = client
         self.selected_ip_getter = selected_ip_getter
         self.items_ref = items_ref
-        self.interval_s = float(interval_s)
+        self.enabled_getter = enabled_getter
+        self.interval_getter = interval_getter
+        self.max_size_getter = max_size_getter
         self.out_queue = out_queue
         self.logger = logger
 
     def run(self) -> None:
         while not self.stop_event.is_set():
+            if not self.enabled_getter():
+                self.stop_event.wait(timeout=0.5)
+                continue
             ip = self.selected_ip_getter()
             if not ip:
                 self.stop_event.wait(timeout=0.5)
                 continue
             item = self.items_ref.get(ip)
             if not item or not item.api_key:
-                self.out_queue.put(("screenshot_error", (ip, "Missing API key")))
-                self.stop_event.wait(timeout=self.interval_s)
+                self.stop_event.wait(timeout=max(0.5, float(self.interval_getter())))
                 continue
             try:
                 payload = self.client.get_screenshot(ip, item.api_key)
-                self.out_queue.put(("screenshot", (ip, payload)))
+                img = decode_screenshot_payload(payload, self.max_size_getter())
+                self.out_queue.put(("screenshot_image", (ip, img, payload, False)))
             except PermissionError:
-                self.out_queue.put(("screenshot_error", (ip, "Invalid API key")))
+                self.logger.warning("Screenshot auto-refresh auth failed for %s", ip)
             except Exception as e:
-                msg = "Could not fetch screenshot"
-                if isinstance(e, requests.Timeout):
-                    msg = "Screenshot timed out"
-                self.out_queue.put(("screenshot_error", (ip, msg)))
-            self.stop_event.wait(timeout=self.interval_s)
+                host = item.display_name() if item else ip
+                self.logger.warning("Screenshot auto-refresh failed for %s: %s", host, e)
+            self.stop_event.wait(timeout=max(0.5, float(self.interval_getter())))
 
 
 class NetworkScanWorker(threading.Thread):
@@ -354,6 +400,8 @@ class ControllerApp:
         self._screenshot_photo: Optional[ImageTk.PhotoImage] = None
         self._screenshot_history: List[Image.Image] = []
         self._screenshot_history_idx: int = -1
+        self._manual_screenshot_busy: bool = False
+        self._last_selected_ip_snapshot: str = ""
 
         self._build_ui()
         self._bind_shortcuts()
@@ -376,7 +424,12 @@ class ControllerApp:
             client=self.client,
             selected_ip_getter=lambda: self._selected_ip,
             items_ref=self.items,
-            interval_s=float(self.config.screenshot_interval),
+            enabled_getter=lambda: bool(self.config.screenshot.get("auto_refresh_enabled", False)),
+            interval_getter=lambda: float(self.config.screenshot.get("refresh_interval", 5)),
+            max_size_getter=lambda: (
+                int(self.config.screenshot.get("max_width", 1280)),
+                int(self.config.screenshot.get("max_height", 720)),
+            ),
             out_queue=self.events,
             logger=self.logger,
         )
@@ -447,18 +500,44 @@ class ControllerApp:
     def _setup_right_panel(self) -> None:
         ttk.Label(self.right, text="Screenshot Viewer", font=("Segoe UI", 12, "bold")).pack(anchor="w")
 
-        self.screenshot_meta = ttk.Label(self.right, text="No PC selected", anchor="w")
-        self.screenshot_meta.pack(fill=tk.X, pady=(6, 6))
+        self.screenshot_status_line = ttk.Label(self.right, text="No PC selected", anchor="w")
+        self.screenshot_status_line.pack(fill=tk.X, pady=(6, 4))
 
-        self.image_border = ttk.Frame(self.right, relief=tk.GROOVE, borderwidth=2)
+        self.screenshot_meta = ttk.Label(self.right, text="", anchor="w")
+        self.screenshot_meta.pack(fill=tk.X, pady=(0, 6))
+
+        self.image_border = tk.Frame(self.right, relief=tk.GROOVE, borderwidth=2, bg="#2d2d2d")
         self.image_border.pack(fill=tk.BOTH, expand=True)
-        self.image_label = ttk.Label(self.image_border, text="(screenshot here)", anchor="center")
+        self.image_label = tk.Label(
+            self.image_border,
+            text="Click 'Refresh' to view screen",
+            anchor="center",
+            bg="#3a3a3a",
+            fg="#b0b0b0",
+            font=("Segoe UI", 11),
+            wraplength=480,
+        )
         self.image_label.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
         self.image_label.bind("<Configure>", lambda e: self._render_current_screenshot())
 
         btns = ttk.Frame(self.right)
         btns.pack(fill=tk.X, pady=(10, 6))
-        ttk.Button(btns, text="Refresh", command=self.refresh_screenshot).pack(side=tk.LEFT, padx=(0, 6))
+        self.refresh_button = ttk.Button(btns, text="📺 Refresh Screenshot", command=self.refresh_screenshot, state=tk.DISABLED)
+        self.refresh_button.pack(side=tk.LEFT, padx=(0, 6))
+        self.refresh_tooltip = _Tooltip(self.refresh_button)
+        self.refresh_tooltip.set_text("Get latest screenshot of selected PC")
+        self.refresh_button.bind("<Enter>", self._on_refresh_tooltip_enter)
+        self.refresh_button.bind("<Leave>", lambda e: self.refresh_tooltip.hide())
+
+        self.auto_refresh_var = tk.BooleanVar(value=bool(self.config.screenshot.get("auto_refresh_enabled", False)))
+        self.auto_refresh_cb = ttk.Checkbutton(
+            btns,
+            text="Auto-Refresh",
+            variable=self.auto_refresh_var,
+            command=self._on_auto_refresh_toggle,
+        )
+        self.auto_refresh_cb.pack(side=tk.LEFT, padx=(0, 12))
+
         ttk.Button(btns, text="Lock", command=self.lock_pc).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(btns, text="Shutdown", command=self.shutdown_pc).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(btns, text="Settings", command=self.open_settings).pack(side=tk.RIGHT)
@@ -468,6 +547,8 @@ class ControllerApp:
         ttk.Button(history, text="◀", width=4, command=lambda: self._step_history(-1)).pack(side=tk.LEFT)
         ttk.Button(history, text="▶", width=4, command=lambda: self._step_history(1)).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(history, text="Save Screenshot", command=self.save_screenshot).pack(side=tk.RIGHT)
+
+        self._sync_refresh_button_state()
 
     def _bind_shortcuts(self) -> None:
         self.root.bind_all("<Control-r>", lambda e: self.refresh_screenshot())
@@ -518,7 +599,12 @@ class ControllerApp:
 
         if self.config.selected_pc_ip and self.config.selected_pc_ip in self.items:
             self._selected_ip = self.config.selected_pc_ip
+            self._last_selected_ip_snapshot = self._selected_ip
             self._select_tree_ip(self._selected_ip)
+            item = self.items.get(self._selected_ip)
+            if item:
+                self.screenshot_status_line.configure(text=f"Selected: {item.display_name()} ({item.ip})")
+        self._sync_refresh_button_state()
 
     def _refresh_tree(self) -> None:
         self.tree.delete(*self.tree.get_children())
@@ -653,14 +739,56 @@ class ControllerApp:
         sel = self.tree.selection()
         if not sel:
             self._selected_ip = ""
-            self.screenshot_meta.configure(text="No PC selected")
+            self._last_selected_ip_snapshot = ""
+            self.screenshot_status_line.configure(text="No PC selected")
+            self.screenshot_meta.configure(text="")
+            self._sync_refresh_button_state()
             return
         ip = sel[0]
+        if ip != self._last_selected_ip_snapshot:
+            self._reset_screenshot_view()
+        self._last_selected_ip_snapshot = ip
         self._selected_ip = ip
         item = self.items.get(ip)
         if item:
-            self.screenshot_meta.configure(text=f"Selected: {item.display_name()} ({item.ip})")
+            self.screenshot_status_line.configure(text=f"Selected: {item.display_name()} ({item.ip})")
+        self._sync_refresh_button_state()
         self._set_status(f"Selected {ip}")
+
+    def _on_refresh_tooltip_enter(self, event: tk.Event) -> None:
+        self.refresh_tooltip.show(self.root.winfo_pointerx() + 12, self.root.winfo_pointery() + 12)
+
+    def _on_auto_refresh_toggle(self) -> None:
+        self.config.screenshot["auto_refresh_enabled"] = bool(self.auto_refresh_var.get())
+        self.save_config()
+        self._set_status(f"Auto-refresh {'enabled' if self.auto_refresh_var.get() else 'disabled'}")
+
+    def _sync_refresh_button_state(self) -> None:
+        if not getattr(self, "refresh_button", None):
+            return
+        ip = self._selected_ip
+        item = self.items.get(ip) if ip else None
+        can = bool(ip and item and item.api_key)
+        if self._manual_screenshot_busy:
+            self.refresh_button.config(state=tk.DISABLED)
+        else:
+            self.refresh_button.config(state=tk.NORMAL if can else tk.DISABLED)
+
+    def _reset_screenshot_view(self) -> None:
+        self._screenshot_history = []
+        self._screenshot_history_idx = -1
+        self._screenshot_photo = None
+        try:
+            self.image_label.configure(
+                image="",
+                text="Click 'Refresh' to view screen",
+                bg="#3a3a3a",
+                fg="#b0b0b0",
+            )
+            self.image_label.image = None  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        self.screenshot_meta.configure(text="")
 
     # ---------------- Right panel behaviors ----------------
 
@@ -676,21 +804,31 @@ class ControllerApp:
             messagebox.showerror("Missing API key", "This PC has no API key configured.")
             return
 
+        self._manual_screenshot_busy = True
+        self._sync_refresh_button_state()
         self._set_status("Fetching screenshot...")
+        hostname = item.display_name()
+        threading.Thread(target=self._manual_screenshot_thread, args=(ip, item.api_key, hostname), daemon=True).start()
 
-        def _fetch() -> None:
-            try:
-                payload = self.client.get_screenshot(ip, item.api_key)
-                self.events.put(("screenshot", (ip, payload)))
-            except PermissionError:
-                self.events.put(("screenshot_error", (ip, "Invalid API key")))
-            except Exception as e:
-                msg = "Could not fetch screenshot"
-                if isinstance(e, requests.Timeout):
-                    msg = "Screenshot timed out"
-                self.events.put(("screenshot_error", (ip, msg)))
-
-        threading.Thread(target=_fetch, daemon=True).start()
+    def _manual_screenshot_thread(self, ip: str, api_key: str, hostname: str) -> None:
+        try:
+            payload = self.client.get_screenshot(ip, api_key)
+            max_size = (
+                int(self.config.screenshot.get("max_width", 1280)),
+                int(self.config.screenshot.get("max_height", 720)),
+            )
+            img = decode_screenshot_payload(payload, max_size)
+            self.events.put(("screenshot_image", (ip, img, payload, True)))
+            self.logger.info("Screenshot refreshed: %s (%s)", hostname, ip)
+        except PermissionError:
+            self.events.put(("screenshot_error", (ip, "Authentication failed — check API key", True)))
+            self.logger.error("Screenshot failed: %s — invalid API key", hostname)
+        except Exception as e:
+            msg = screenshot_exception_message(e)
+            self.events.put(("screenshot_error", (ip, msg, True)))
+            self.logger.error("Screenshot failed: %s — %s", hostname, e)
+        finally:
+            self.events.put(("screenshot_manual_done", ()))
 
     def lock_pc(self) -> None:
         targets = self._selected_items()
@@ -789,7 +927,7 @@ class ControllerApp:
         frame.pack(fill=tk.BOTH, expand=True)
 
         ttk.Label(frame, text="Screenshot refresh interval (3-30s):").grid(row=0, column=0, sticky="w")
-        scr_var = tk.IntVar(value=int(self.config.screenshot_interval))
+        scr_var = tk.IntVar(value=int(self.config.screenshot.get("refresh_interval", 5)))
         ttk.Spinbox(frame, from_=3, to=30, textvariable=scr_var, width=8).grid(row=0, column=1, sticky="w", padx=(8, 0))
 
         ttk.Label(frame, text="Auto status interval (10-300s):").grid(row=1, column=0, sticky="w", pady=(8, 0))
@@ -809,7 +947,7 @@ class ControllerApp:
         btns.grid(row=4, column=0, columnspan=2, sticky="e", pady=(14, 0))
 
         def _apply() -> None:
-            self.config.screenshot_interval = int(scr_var.get())
+            self.config.screenshot["refresh_interval"] = max(3, min(30, int(scr_var.get())))
             self.config.auto_detect_interval = int(st_var.get())
             self.config.general["dark_mode"] = bool(dark_var.get())
             self.config.general["log_level"] = str(lvl_var.get())
@@ -840,14 +978,20 @@ class ControllerApp:
                     self._refresh_tree()
                     if ip == self._selected_ip:
                         self._update_status_bar_selected()
-                elif kind == "screenshot":
-                    ip, data = payload
+                elif kind == "screenshot_image":
+                    ip, img, data, is_manual = payload
                     if ip == self._selected_ip:
-                        self._handle_screenshot_payload(data)
+                        self._apply_screenshot_from_image(img, data, is_manual)
                 elif kind == "screenshot_error":
-                    ip, msg = payload
-                    if ip == self._selected_ip:
-                        self._set_status(msg)
+                    ip, msg, is_manual = payload
+                    if is_manual and ip == self._selected_ip:
+                        item = self.items.get(ip)
+                        host = item.display_name() if item else ip
+                        self._set_status(f"✗ Error: {msg}")
+                        self.logger.error("Screenshot failed: %s — %s", host, msg)
+                elif kind == "screenshot_manual_done":
+                    self._manual_screenshot_busy = False
+                    self._sync_refresh_button_state()
                 elif kind == "scan_result":
                     self._hide_progress()
                     self._scan_in_flight = False
@@ -927,23 +1071,29 @@ class ControllerApp:
 
     # ---------------- Screenshot handling ----------------
 
-    def _handle_screenshot_payload(self, payload: Dict[str, Any]) -> None:
+    def _apply_screenshot_from_image(self, img: Image.Image, payload: Dict[str, Any], is_manual: bool) -> None:
         try:
-            b64 = str(payload.get("screenshot") or "")
             ts = str(payload.get("timestamp") or "")
             w = payload.get("width", None)
             h = payload.get("height", None)
-            if not b64:
-                raise ValueError("missing screenshot")
-            raw = base64.b64decode(b64)
-            img = Image.open(io.BytesIO(raw)).convert("RGB")
             self._push_history(img)
-            self.screenshot_meta.configure(text=f"Resolution: {w}x{h}    Timestamp: {ts}")
+            stamp = datetime.now().strftime("%H:%M:%S")
+            meta_parts: List[str] = []
+            if w is not None and h is not None:
+                meta_parts.append(f"Resolution: {w}×{h}")
+            if ts:
+                meta_parts.append(f"Agent time: {ts}")
+            meta_parts.append(f"Last updated: {stamp}")
+            self.screenshot_meta.configure(text="    ".join(meta_parts))
             self._render_current_screenshot()
-            self._set_status("Screenshot updated")
+            item = self.items.get(self._selected_ip)
+            name = item.display_name() if item else (self._selected_ip or "PC")
+            if is_manual:
+                self._set_status(f"✓ Screenshot updated — {name} — Last updated: {stamp}")
         except Exception:
             self.logger.warning("bad screenshot payload", exc_info=True)
-            self._set_status("Invalid screenshot data")
+            if is_manual:
+                self._set_status("✗ Error: Failed to display screenshot")
 
     def _push_history(self, img: Image.Image) -> None:
         self._screenshot_history.append(img)
@@ -960,7 +1110,8 @@ class ControllerApp:
         fit = img.copy()
         fit.thumbnail((w - 10, h - 10), Image.Resampling.LANCZOS)
         self._screenshot_photo = ImageTk.PhotoImage(fit)
-        self.image_label.configure(image=self._screenshot_photo, text="")
+        self.image_label.configure(image=self._screenshot_photo, text="", bg="#2d2d2d")
+        self.image_label.image = self._screenshot_photo
 
     # ---------------- Status / dialogs ----------------
 

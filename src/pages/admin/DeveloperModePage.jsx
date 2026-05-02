@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Monitor, RefreshCw, Search, AlertCircle, Radio } from 'lucide-react';
 import networkApi from '../../services/network-api.js';
 import { agentsApi } from '../../services/api.js';
 import socketService from '../../services/socketService.js';
 
 const RESULT_TIMEOUT_MS = 90000;
+const SCREENSHOT_AUTO_MS = 3000;
 
 function DeveloperModePage() {
   const [discovering, setDiscovering] = useState(false);
@@ -18,6 +19,13 @@ function DeveloperModePage() {
   const [lockingIp, setLockingIp] = useState('');
   const [lockStatus, setLockStatus] = useState('');
   const [lockError, setLockError] = useState('');
+  const [screenshotUrl, setScreenshotUrl] = useState('');
+  const [screenshotStatus, setScreenshotStatus] = useState('');
+  const [screenshotFetching, setScreenshotFetching] = useState(false);
+  const [autoRefreshScreenshot, setAutoRefreshScreenshot] = useState(false);
+  const selectedAgentIdRef = useRef(null);
+  const selectedDisplayRef = useRef({ host: 'PC', ip: '' });
+  const lastScreenshotRequestRef = useRef({ silent: false });
 
   const results = useMemo(() => {
     const items = Object.values(resultsByIp);
@@ -32,6 +40,22 @@ function DeveloperModePage() {
   }, []);
 
   const selectedDevice = results.find((d) => d.ip === selectedIp) || null;
+
+  useEffect(() => {
+    selectedAgentIdRef.current = selectedDevice?.agentId || null;
+  }, [selectedDevice?.agentId]);
+
+  useEffect(() => {
+    const d = Object.values(resultsByIp).find((x) => x.ip === selectedIp);
+    const host = d?.user || d?.hostname || selectedIp || 'PC';
+    selectedDisplayRef.current = { ip: selectedIp || '', host };
+  }, [resultsByIp, selectedIp]);
+
+  useEffect(() => {
+    setScreenshotUrl('');
+    setScreenshotStatus('');
+    setScreenshotFetching(false);
+  }, [selectedIp]);
 
   const lockDevice = async (device) => {
     if (!device?.ip) return;
@@ -62,6 +86,81 @@ function DeveloperModePage() {
       setLockingIp('');
     }
   };
+
+  const applyScreenshotResult = useCallback((event) => {
+    if (event.action !== 'screenshot') return;
+    const agentId = selectedAgentIdRef.current;
+    if (!agentId || event.computerId !== agentId) return;
+
+    const { silent } = lastScreenshotRequestRef.current;
+    setScreenshotFetching(false);
+
+    if (event.success && event.result?.screenshot) {
+      const fmt = (event.result.format || 'png').toLowerCase();
+      const mime =
+        fmt === 'jpeg' || fmt === 'jpg'
+          ? 'image/jpeg'
+          : fmt === 'png'
+            ? 'image/png'
+            : 'image/png';
+      setScreenshotUrl(`data:${mime};base64,${event.result.screenshot}`);
+      const t = new Date().toLocaleTimeString();
+      const host = selectedDisplayRef.current.host;
+      if (!silent) {
+        setScreenshotStatus(`✓ Screenshot updated — ${host} — Last updated: ${t}`);
+      } else {
+        setScreenshotStatus(`Live — ${host} — Last updated: ${t}`);
+      }
+      return;
+    }
+
+    const msg = event.error || event.result?.error || 'Screenshot failed';
+    if (!silent) {
+      setScreenshotStatus(`✗ Error: ${msg}`);
+    }
+  }, []);
+
+  useEffect(() => {
+    const unsub = socketService.on('agent_command_result', applyScreenshotResult);
+    return unsub;
+  }, [applyScreenshotResult]);
+
+  const requestScreenshot = useCallback(
+    async ({ silent = false } = {}) => {
+      const agentId = selectedAgentIdRef.current;
+      if (!agentId) {
+        if (!silent) {
+          setScreenshotStatus('✗ Screen preview requires a PC connected via the DYCI agent.');
+        }
+        return;
+      }
+      lastScreenshotRequestRef.current = { silent };
+      if (!silent) {
+        setScreenshotFetching(true);
+        setScreenshotStatus('Fetching screenshot...');
+      }
+      try {
+        await agentsApi.sendCommand(agentId, 'screenshot', {});
+      } catch (error) {
+        setScreenshotFetching(false);
+        if (!silent) {
+          setScreenshotStatus(`✗ Error: ${error.message || 'Could not send screenshot command'}`);
+        }
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (!autoRefreshScreenshot || !selectedDevice?.agentId) {
+      return undefined;
+    }
+    const tick = () => {
+      requestScreenshot({ silent: true });
+    };
+    const id = window.setInterval(tick, SCREENSHOT_AUTO_MS);
+    return () => window.clearInterval(id);
+  }, [autoRefreshScreenshot, selectedDevice?.agentId, requestScreenshot]);
 
   const runDiscovery = async () => {
     setDiscovering(true);
@@ -146,18 +245,23 @@ function DeveloperModePage() {
 
       unsubscribeBroadcast = socketService.on('service_discovered', (data) => {
         if (!data?.ip) return;
-        setResultsByIp((prev) => ({
-          ...prev,
-          [data.ip]: {
-            hostname: data.user || data.hostname || 'Unknown',
-            ip: data.ip,
-            mac: '',
-            status: 'online',
-            connection_type: 'unknown',
-            user: data.user || '',
-            source: 'broadcast'
-          }
-        }));
+        setResultsByIp((prev) => {
+          const existing = prev[data.ip] || {};
+          return {
+            ...prev,
+            [data.ip]: {
+              ...existing,
+              hostname: data.user || data.hostname || existing.hostname || 'Unknown',
+              ip: data.ip,
+              mac: existing.mac || '',
+              status: 'online',
+              connection_type: existing.connection_type || 'unknown',
+              user: data.user || existing.user || '',
+              source: existing.source ? `${existing.source}+broadcast` : 'broadcast',
+              agentId: existing.agentId
+            }
+          };
+        });
       });
 
       const subnet = scanSubnet.trim();
@@ -307,6 +411,68 @@ function DeveloperModePage() {
             </tbody>
           </table>
         </div>
+
+        {selectedIp ? (
+          <div className="border-t border-gray-200 bg-gray-50 p-6 space-y-4">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <h3 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+                  <Monitor className="w-5 h-5 text-indigo-600" />
+                  Screen preview
+                </h3>
+                <p className="text-sm text-gray-600 mt-1">
+                  {selectedDevice
+                    ? `${selectedDevice.user || selectedDevice.hostname || 'Unknown'} (${selectedIp})`
+                    : selectedIp}
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  title="Get latest screenshot of selected PC"
+                  onClick={() => requestScreenshot({ silent: false })}
+                  disabled={!selectedDevice?.agentId || screenshotFetching}
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <RefreshCw className={`w-4 h-4 ${screenshotFetching ? 'animate-spin' : ''}`} />
+                  {screenshotFetching ? 'Fetching…' : '📺 Refresh screenshot'}
+                </button>
+                <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    className="rounded border-gray-300"
+                    checked={autoRefreshScreenshot}
+                    onChange={(e) => setAutoRefreshScreenshot(e.target.checked)}
+                    disabled={!selectedDevice?.agentId}
+                  />
+                  Auto-refresh ({SCREENSHOT_AUTO_MS / 1000}s)
+                </label>
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-gray-300 bg-[#2d2d2d] min-h-[280px] flex items-center justify-center overflow-hidden">
+              {screenshotUrl ? (
+                <img
+                  src={screenshotUrl}
+                  alt={`Desktop ${selectedIp}`}
+                  className="max-w-full max-h-[min(70vh,720px)] w-auto h-auto object-contain"
+                />
+              ) : (
+                <p className="text-center text-gray-400 text-sm px-6 py-12 max-w-md">
+                  {selectedDevice?.agentId
+                    ? 'Click “Refresh screenshot” to view this PC’s desktop.'
+                    : 'Install and connect the DYCI agent on this PC to view the screen (same requirement as Lock).'}
+                </p>
+              )}
+            </div>
+
+            {screenshotStatus && (
+              <p className={`text-sm ${screenshotStatus.startsWith('✗') ? 'text-red-700' : 'text-emerald-800'}`}>
+                {screenshotStatus}
+              </p>
+            )}
+          </div>
+        ) : null}
       </div>
     </div>
   );

@@ -51,7 +51,14 @@ class ControllerConfig:
 
     path: str = "controller_config.json"
     window: Dict[str, int] = field(default_factory=lambda: {"width": 1200, "height": 800, "x": 100, "y": 100})
-    screenshot_interval: int = 5
+    screenshot: Dict[str, Any] = field(
+        default_factory=lambda: {
+            "auto_refresh_enabled": False,
+            "refresh_interval": 5,
+            "max_width": 1280,
+            "max_height": 720,
+        }
+    )
     auto_detect_interval: int = 30
     known_pcs: List[KnownPC] = field(default_factory=list)
     general: Dict[str, Any] = field(default_factory=lambda: {"dark_mode": False, "log_level": "INFO"})
@@ -75,7 +82,14 @@ class ControllerConfig:
         cfg = cls.default(path=path)
         if isinstance(raw, dict):
             cfg.window = dict(raw.get("window") or cfg.window)
-            cfg.screenshot_interval = int(raw.get("screenshot_interval") or cfg.screenshot_interval)
+            scr = raw.get("screenshot")
+            if isinstance(scr, dict):
+                merged = dict(cfg.screenshot)
+                merged.update(scr)
+                cfg.screenshot = merged
+            legacy_iv = raw.get("screenshot_interval")
+            if legacy_iv is not None:
+                cfg.screenshot["refresh_interval"] = int(legacy_iv)
             cfg.auto_detect_interval = int(raw.get("auto_detect_interval") or cfg.auto_detect_interval)
             cfg.general = dict(raw.get("general") or cfg.general)
             cfg.selected_pc_ip = str(raw.get("selected_pc_ip") or "")
@@ -84,14 +98,17 @@ class ControllerConfig:
             if isinstance(pcs, list):
                 cfg.known_pcs = [KnownPC.from_dict(p) for p in pcs if isinstance(p, dict) and p.get("ip")]
 
-        cfg.screenshot_interval = max(3, min(30, int(cfg.screenshot_interval)))
+        cfg.screenshot["refresh_interval"] = max(3, min(30, int(cfg.screenshot.get("refresh_interval", 5))))
+        cfg.screenshot["max_width"] = max(320, min(3840, int(cfg.screenshot.get("max_width", 1280))))
+        cfg.screenshot["max_height"] = max(240, min(2160, int(cfg.screenshot.get("max_height", 720))))
         cfg.auto_detect_interval = max(10, min(300, int(cfg.auto_detect_interval)))
         return cfg
 
     def save(self) -> None:
         data = {
             "window": self.window,
-            "screenshot_interval": int(self.screenshot_interval),
+            "screenshot_interval": int(self.screenshot.get("refresh_interval", 5)),
+            "screenshot": dict(self.screenshot),
             "auto_detect_interval": int(self.auto_detect_interval),
             "known_pcs": [pc.to_dict() for pc in self.known_pcs],
             "general": self.general,
@@ -127,4 +144,12 @@ class ControllerConfig:
             if pc.ip == ip:
                 return pc
         return None
+
+    @property
+    def screenshot_interval(self) -> int:
+        return int(self.screenshot.get("refresh_interval", 5))
+
+    @screenshot_interval.setter
+    def screenshot_interval(self, value: int) -> None:
+        self.screenshot["refresh_interval"] = max(3, min(30, int(value)))
 

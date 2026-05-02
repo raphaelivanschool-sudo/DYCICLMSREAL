@@ -7,8 +7,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import dgram from 'dgram';
-// PowerShell functionality removed - using exec commands instead
-// import screenshot from 'screenshot-desktop'; // Temporarily disabled
+import screenshot from 'screenshot-desktop';
 import { spawn, exec } from 'child_process';
 import { promisify } from 'util';
 import { runPythonDiscovery } from './pythonDiscovery.js';
@@ -441,9 +440,9 @@ class PCAgent {
         case 'vnc-stop':
           result = await this.stopVNC();
           break;
-        // case 'screenshot':
-        //   result = await this.takeScreenshot();
-        //   break;
+        case 'screenshot':
+          result = await this.takeScreenshot();
+          break;
         case 'get-info':
           result = await this.getSystemInfo();
           break;
@@ -594,22 +593,24 @@ class PCAgent {
     }
   }
 
-  // async takeScreenshot() {
-  //   this.logger.info('Taking screenshot...');
-  //   try {
-  //     const img = await screenshot();
-  //     const base64 = img.toString('base64');
-  //     
-  //     return {
-  //       success: true,
-  //       image: base64,
-  //       format: 'png',
-  //       timestamp: new Date()
-  //     };
-  //   } catch (error) {
-  //     throw new Error('Failed to take screenshot: ' + error.message);
-  //   }
-  // }
+  async takeScreenshot() {
+    this.logger.info('Taking screenshot...');
+    try {
+      const buffer = await screenshot();
+      if (!buffer || buffer.length === 0) {
+        throw new Error('Empty screenshot buffer');
+      }
+      const base64 = Buffer.from(buffer).toString('base64');
+      return {
+        success: true,
+        screenshot: base64,
+        format: 'png',
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      throw new Error('Failed to take screenshot: ' + error.message);
+    }
+  }
 
   generateRandomPassword(length) {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';

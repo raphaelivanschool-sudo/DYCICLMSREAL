@@ -1,0 +1,5 @@
+[2026-05-02 10:40:13] [INFO] [controller] controller started
+[2026-05-02 10:40:13] [INFO] [controller] controller started
+[2026-05-02 10:40:13] [INFO] [controller] Screenshot refreshed: GUEST (192.168.1.50)
+[2026-05-02 10:40:14] [INFO] [controller] controller started
+[2026-05-02 10:40:15] [WARNING] [controller] api GET http://192.168.1.10:5555/status failed (2027ms): HTTPConnectionPool(host='192.168.1.10', port=5555): Max retries exceeded with url: /status (Caused by ConnectTimeoutError(<urllib3.connection.HTTPConnection object at 0x0000023CABFF2F90>, 'Connection to 192.168.1.10 timed out. (connect timeout=2.0)'))
