@@ -7,6 +7,29 @@ import socketService from '../../services/socketService.js';
 const RESULT_TIMEOUT_MS = 90000;
 const SCREENSHOT_AUTO_MS = 3000;
 
+/** Attach agent UUID to scan/broadcast rows when an online agent reports the same LAN IP (or ipAddresses). */
+function mergeAgentIdsOntoScanRows(prevByIp, connectedDevices) {
+  if (!connectedDevices?.length) return prevByIp;
+  const next = { ...prevByIp };
+  for (const ip of Object.keys(next)) {
+    const row = next[ip];
+    if (row.agentId) continue;
+    const match = connectedDevices.find((d) => {
+      const ips = [d.ip, ...(Array.isArray(d.ipAddresses) ? d.ipAddresses : [])].filter(Boolean);
+      return ips.some((a) => String(a) === String(ip));
+    });
+    if (match?.id) {
+      next[ip] = {
+        ...row,
+        agentId: match.id,
+        connection_type: 'agent',
+        source: row.source && !String(row.source).includes('agent') ? `${row.source}+agent` : 'agent',
+      };
+    }
+  }
+  return next;
+}
+
 function DeveloperModePage() {
   const [discovering, setDiscovering] = useState(false);
   const [discoveryError, setDiscoveryError] = useState('');
@@ -24,6 +47,8 @@ function DeveloperModePage() {
   const [screenshotFetching, setScreenshotFetching] = useState(false);
   const [autoRefreshScreenshot, setAutoRefreshScreenshot] = useState(false);
   const selectedAgentIdRef = useRef(null);
+  const commandTargetComputerIdRef = useRef(null);
+  const pendingScreenshotCommandRef = useRef(false);
   const selectedDisplayRef = useRef({ host: 'PC', ip: '' });
   const lastScreenshotRequestRef = useRef({ silent: false });
 
@@ -43,6 +68,7 @@ function DeveloperModePage() {
 
   useEffect(() => {
     selectedAgentIdRef.current = selectedDevice?.agentId || null;
+    commandTargetComputerIdRef.current = selectedDevice?.agentId || null;
   }, [selectedDevice?.agentId]);
 
   useEffect(() => {
@@ -55,6 +81,7 @@ function DeveloperModePage() {
     setScreenshotUrl('');
     setScreenshotStatus('');
     setScreenshotFetching(false);
+    pendingScreenshotCommandRef.current = false;
   }, [selectedIp]);
 
   const lockDevice = async (device) => {
@@ -73,14 +100,19 @@ function DeveloperModePage() {
     setLockError('');
 
     try {
-      if (!device.agentId) {
-        throw new Error('Lock requires an agent-connected PC. Run the DYCI agent on this target.');
+      if (!device.ip) {
+        throw new Error('Missing IP for this row.');
       }
-      await agentsApi.sendCommand(device.agentId, 'lock', {});
+      const res = await agentsApi.sendCommand(device.agentId, 'lock', {}, { ip: device.ip, mac: device.mac });
+      const rid = res?.data?.resolvedComputerId;
+      if (rid) {
+        commandTargetComputerIdRef.current = rid;
+      }
       setLockStatus(`✓ ${hostname} Locked`);
       setLockError('');
     } catch (error) {
-      setLockError(`✗ Lock failed: ${error.message || 'Unknown error'}`);
+      const msg = error.response?.data?.error || error.message || 'Unknown error';
+      setLockError(`✗ Lock failed: ${msg}`);
       setLockStatus('');
     } finally {
       setLockingIp('');
@@ -89,8 +121,15 @@ function DeveloperModePage() {
 
   const applyScreenshotResult = useCallback((event) => {
     if (event.action !== 'screenshot') return;
-    const agentId = selectedAgentIdRef.current;
-    if (!agentId || event.computerId !== agentId) return;
+    const candidates = [selectedAgentIdRef.current, commandTargetComputerIdRef.current].filter(Boolean);
+    let matches = Boolean(event.computerId && candidates.includes(event.computerId));
+    if (!matches && pendingScreenshotCommandRef.current && event.computerId) {
+      pendingScreenshotCommandRef.current = false;
+      commandTargetComputerIdRef.current = event.computerId;
+      matches = true;
+    }
+    if (!matches) return;
+    pendingScreenshotCommandRef.current = false;
 
     const { silent } = lastScreenshotRequestRef.current;
     setScreenshotFetching(false);
@@ -127,32 +166,41 @@ function DeveloperModePage() {
 
   const requestScreenshot = useCallback(
     async ({ silent = false } = {}) => {
-      const agentId = selectedAgentIdRef.current;
-      if (!agentId) {
+      const agentId = selectedDevice?.agentId;
+      const ip = selectedDevice?.ip;
+      const mac = selectedDevice?.mac;
+      if (!ip) {
         if (!silent) {
-          setScreenshotStatus('✗ Screen preview requires a PC connected via the DYCI agent.');
+          setScreenshotStatus('✗ Select a PC row with an IP address.');
         }
         return;
       }
       lastScreenshotRequestRef.current = { silent };
+      pendingScreenshotCommandRef.current = true;
       if (!silent) {
         setScreenshotFetching(true);
         setScreenshotStatus('Fetching screenshot...');
       }
       try {
-        await agentsApi.sendCommand(agentId, 'screenshot', {});
+        const res = await agentsApi.sendCommand(agentId, 'screenshot', {}, { ip, mac });
+        const rid = res?.data?.resolvedComputerId;
+        if (rid) {
+          commandTargetComputerIdRef.current = rid;
+        }
       } catch (error) {
+        pendingScreenshotCommandRef.current = false;
         setScreenshotFetching(false);
         if (!silent) {
-          setScreenshotStatus(`✗ Error: ${error.message || 'Could not send screenshot command'}`);
+          const msg = error.response?.data?.error || error.message || 'Could not send screenshot command';
+          setScreenshotStatus(`✗ Error: ${msg}`);
         }
       }
     },
-    []
+    [selectedDevice?.agentId, selectedDevice?.ip, selectedDevice?.mac]
   );
 
   useEffect(() => {
-    if (!autoRefreshScreenshot || !selectedDevice?.agentId) {
+    if (!autoRefreshScreenshot || !selectedDevice?.ip) {
       return undefined;
     }
     const tick = () => {
@@ -160,7 +208,7 @@ function DeveloperModePage() {
     };
     const id = window.setInterval(tick, SCREENSHOT_AUTO_MS);
     return () => window.clearInterval(id);
-  }, [autoRefreshScreenshot, selectedDevice?.agentId, requestScreenshot]);
+  }, [autoRefreshScreenshot, selectedDevice?.ip, requestScreenshot]);
 
   const runDiscovery = async () => {
     setDiscovering(true);
@@ -184,21 +232,29 @@ function DeveloperModePage() {
         setResultsByIp((prev) => {
           const next = { ...prev };
           connectedAgents.forEach((device) => {
-            if (!device?.ip) return;
-            const existing = next[device.ip] || {};
-            next[device.ip] = {
-              ...existing,
-              hostname: device.user || device.name || existing.hostname || 'Unknown',
-              ip: device.ip,
-              mac: device.mac || existing.mac || '',
-              status: device.status || existing.status || 'online',
-              connection_type: 'agent',
-              source: existing.source ? `${existing.source}+agent` : 'agent',
-              agentId: device.id,
-              user: device.user || existing.user || ''
-            };
+            if (!device?.id) return;
+            const ips = [
+              ...new Set(
+                [device.ip, ...(Array.isArray(device.ipAddresses) ? device.ipAddresses : [])].filter(Boolean)
+              ),
+            ];
+            ips.forEach((dip) => {
+              const existing = next[dip] || {};
+              next[dip] = {
+                ...existing,
+                hostname:
+                  device.user || device.name || device.hostname || existing.hostname || 'Unknown',
+                ip: dip,
+                mac: device.mac || existing.mac || '',
+                status: device.status || existing.status || 'online',
+                connection_type: 'agent',
+                source: existing.source ? `${existing.source}+agent` : 'agent',
+                agentId: device.id,
+                user: device.user || existing.user || '',
+              };
+            });
           });
-          return next;
+          return mergeAgentIdsOntoScanRows(next, connectedAgents);
         });
       }
 
@@ -214,21 +270,24 @@ function DeveloperModePage() {
           const ip = event.device.ip;
           setResultsByIp((prev) => {
             const existing = prev[ip] || {};
-            return {
-              ...prev,
-              [ip]: {
-                ...existing,
-                hostname: event.device.user || event.device.hostname || existing.hostname || event.device.name || 'Unknown',
-                ip,
-                mac: event.device.mac || existing.mac || '',
-                status: event.device.status || existing.status || 'online',
-                connection_type: existing.connection_type || 'unknown',
-                user: event.device.user || existing.user || '',
-                source: existing.source
-                  ? `${existing.source.includes('scan') ? existing.source : `${existing.source}+scan`}`
-                  : 'scan'
-              }
+            const row = {
+              ...existing,
+              hostname:
+                event.device.user ||
+                event.device.hostname ||
+                existing.hostname ||
+                event.device.name ||
+                'Unknown',
+              ip,
+              mac: event.device.mac || existing.mac || '',
+              status: event.device.status || existing.status || 'online',
+              connection_type: existing.connection_type || 'unknown',
+              user: event.device.user || existing.user || '',
+              source: existing.source
+                ? `${existing.source.includes('scan') ? existing.source : `${existing.source}+scan`}`
+                : 'scan',
             };
+            return mergeAgentIdsOntoScanRows({ ...prev, [ip]: row }, connectedAgents);
           });
         });
       });
@@ -247,20 +306,18 @@ function DeveloperModePage() {
         if (!data?.ip) return;
         setResultsByIp((prev) => {
           const existing = prev[data.ip] || {};
-          return {
-            ...prev,
-            [data.ip]: {
-              ...existing,
-              hostname: data.user || data.hostname || existing.hostname || 'Unknown',
-              ip: data.ip,
-              mac: existing.mac || '',
-              status: 'online',
-              connection_type: existing.connection_type || 'unknown',
-              user: data.user || existing.user || '',
-              source: existing.source ? `${existing.source}+broadcast` : 'broadcast',
-              agentId: existing.agentId
-            }
+          const row = {
+            ...existing,
+            hostname: data.user || data.hostname || existing.hostname || 'Unknown',
+            ip: data.ip,
+            mac: existing.mac || '',
+            status: 'online',
+            connection_type: existing.connection_type || 'unknown',
+            user: data.user || existing.user || '',
+            source: existing.source ? `${existing.source}+broadcast` : 'broadcast',
+            agentId: existing.agentId,
           };
+          return mergeAgentIdsOntoScanRows({ ...prev, [data.ip]: row }, connectedAgents);
         });
       });
 
@@ -431,7 +488,7 @@ function DeveloperModePage() {
                   type="button"
                   title="Get latest screenshot of selected PC"
                   onClick={() => requestScreenshot({ silent: false })}
-                  disabled={!selectedDevice?.agentId || screenshotFetching}
+                  disabled={!selectedDevice?.ip || screenshotFetching}
                   className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <RefreshCw className={`w-4 h-4 ${screenshotFetching ? 'animate-spin' : ''}`} />
@@ -443,7 +500,7 @@ function DeveloperModePage() {
                     className="rounded border-gray-300"
                     checked={autoRefreshScreenshot}
                     onChange={(e) => setAutoRefreshScreenshot(e.target.checked)}
-                    disabled={!selectedDevice?.agentId}
+                    disabled={!selectedDevice?.ip}
                   />
                   Auto-refresh ({SCREENSHOT_AUTO_MS / 1000}s)
                 </label>
@@ -459,9 +516,8 @@ function DeveloperModePage() {
                 />
               ) : (
                 <p className="text-center text-gray-400 text-sm px-6 py-12 max-w-md">
-                  {selectedDevice?.agentId
-                    ? 'Click “Refresh screenshot” to view this PC’s desktop.'
-                    : 'Install and connect the DYCI agent on this PC to view the screen (same requirement as Lock).'}
+                  Click “Refresh screenshot”. Commands route by this row&apos;s IP (and MAC when present) to an online
+                  agent when one matches — including scan-only rows when the agent reports the same LAN address.
                 </p>
               )}
             </div>

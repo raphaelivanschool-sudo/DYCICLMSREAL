@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { PrismaClient } from '@prisma/client';
 import dgram from 'dgram';
 import { authenticateToken } from '../middleware/auth.js';
+import { resolveComputerIdFromConnectedAgents } from '../utils/agentLookup.js';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -176,19 +177,24 @@ router.get('/connected', authenticateToken, (req, res) => {
       });
     }
 
-    // Convert Map to array of computer data
-    const devices = Array.from(connectedComputers.values()).map(computerData => ({
-      id: computerData.computer.id,
-      name: computerData.computer.name,
-      ip: computerData.computer.ip,
-      mac: computerData.computer.mac,
-      user: computerData.user || computerData.computer.user,
-      status: computerData.status || 'online',
-      os: computerData.computer.platform || computerData.computer.distro || 'Windows',
-      lastSeen: computerData.lastSeen,
-      specs: computerData.computer.specs || {},
-      socketId: computerData.socketId
-    }));
+    // Convert Map to array of computer data (include ipAddresses for UI merge / commands)
+    const devices = Array.from(connectedComputers.values()).map((computerData) => {
+      const c = computerData.computer || {};
+      return {
+        id: c.id,
+        name: c.name || c.hostname,
+        hostname: c.hostname,
+        ip: c.ip,
+        mac: c.mac,
+        ipAddresses: Array.isArray(c.ipAddresses) ? c.ipAddresses : [],
+        user: computerData.user || c.user,
+        status: computerData.status || 'online',
+        os: c.platform || c.distro || c.os || 'Windows',
+        lastSeen: computerData.lastSeen,
+        specs: c.specs || {},
+        socketId: computerData.socketId,
+      };
+    });
 
     res.json({
       success: true,
@@ -218,19 +224,22 @@ router.get('/connected/:computerId', authenticateToken, (req, res) => {
       });
     }
 
+    const c = computerData.computer || {};
     res.json({
       success: true,
       device: {
-        id: computerData.computer.id,
-        name: computerData.computer.name,
-        ip: computerData.computer.ip,
-        mac: computerData.computer.mac,
-        user: computerData.user || computerData.computer.user,
+        id: c.id,
+        name: c.name || c.hostname,
+        hostname: c.hostname,
+        ip: c.ip,
+        mac: c.mac,
+        ipAddresses: Array.isArray(c.ipAddresses) ? c.ipAddresses : [],
+        user: computerData.user || c.user,
         status: computerData.status || 'online',
-        os: computerData.computer.platform || computerData.computer.distro || 'Windows',
+        os: c.platform || c.distro || c.os || 'Windows',
         lastSeen: computerData.lastSeen,
-        specs: computerData.computer.specs || {}
-      }
+        specs: c.specs || {},
+      },
     });
   } catch (error) {
     console.error('Error getting agent details:', error);
@@ -241,36 +250,49 @@ router.get('/connected/:computerId', authenticateToken, (req, res) => {
   }
 });
 
-// Send command to agent PC
+// Send command to agent PC (by computer UUID and/or client LAN IP / MAC)
 router.post('/command', authenticateToken, (req, res) => {
   try {
     const io = req.app.get('io');
-    const { computerId, action, params } = req.body;
-    
-    if (!computerId || !action) {
+    const connectedComputers = req.app.get('connectedComputers');
+    const { computerId, ip, mac, action, params } = req.body;
+
+    if (!action) {
       return res.status(400).json({
         success: false,
-        error: 'computerId and action are required'
+        error: 'action is required',
       });
     }
 
-    // Emit command to the specific computer room
-    io.to(`computer_${computerId}`).emit('execute_command', {
+    let targetId =
+      computerId ||
+      resolveComputerIdFromConnectedAgents(connectedComputers, { ip, mac });
+
+    if (!targetId) {
+      return res.status(404).json({
+        success: false,
+        error:
+          'No online agent matches this PC. Ensure the DYCI agent is running and try the LAN IP shown in Agent discovery (not only a scan-only row).',
+      });
+    }
+
+    io.to(`computer_${targetId}`).emit('execute_command', {
       action,
       params,
       from: req.user.id,
-      timestamp: new Date()
+      timestamp: new Date(),
     });
 
     res.json({
       success: true,
-      message: `Command ${action} sent to computer ${computerId}`
+      message: `Command ${action} sent to computer ${targetId}`,
+      resolvedComputerId: targetId,
     });
   } catch (error) {
     console.error('Error sending command to agent:', error);
     res.status(500).json({
       success: false,
-      error: 'Failed to send command'
+      error: 'Failed to send command',
     });
   }
 });
@@ -386,42 +408,6 @@ pause
     res.status(500).json({
       success: false,
       error: 'Failed to generate installer'
-    });
-  }
-});
-
-// GET /api/agents/connected - Get currently connected agents
-router.get('/connected', authenticateToken, (req, res) => {
-  try {
-    const io = req.app.get('io');
-    const connectedComputers = req.app.get('connectedComputers');
-    
-    if (!connectedComputers) {
-      return res.json({
-        success: true,
-        devices: [],
-        count: 0,
-        lastScan: new Date().toISOString()
-      });
-    }
-
-    const devices = Array.from(connectedComputers.values()).map(data => ({
-      ...data.computer,
-      status: data.status,
-      lastSeen: data.lastSeen
-    }));
-
-    res.json({
-      success: true,
-      devices,
-      count: devices.length,
-      lastScan: new Date().toISOString()
-    });
-  } catch (error) {
-    console.error('Error getting connected agents:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to get connected agents'
     });
   }
 });

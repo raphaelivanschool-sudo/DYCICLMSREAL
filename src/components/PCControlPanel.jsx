@@ -318,11 +318,11 @@ const PCControlPanel = () => {
   };
 
   const canSendAgentCommand = (pc) => {
-    // Only agent-connected devices can receive commands reliably.
-    // Broadcast-only services may exist without the DYCI agent installed.
+    if (!pc?.ip) return false;
     if (pc.source === 'agent') return true;
     if (pc.source === 'broadcast' && pc.hasAgent) return true;
-    return false;
+    // Server resolves socket agent session by IP/MAC (same as Developer Mode).
+    return true;
   };
 
   const lockPC = async (pc) => {
@@ -334,7 +334,7 @@ const PCControlPanel = () => {
     const key = pc.id || pc.ip;
     setSendingCommand((prev) => ({ ...prev, [key]: true }));
     try {
-      await agentsApi.sendCommand(pc.id, 'lock');
+      await agentsApi.sendCommand(pc.id, 'lock', {}, { ip: pc.ip, mac: pc.mac });
       showToast(`Lock command sent to ${pc.name}`);
     } catch (err) {
       console.error('Failed to lock PC:', err);

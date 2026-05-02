@@ -128,9 +128,14 @@ export const agentsApi = {
   // Get specific agent PC details
   getById: (computerId) => api.get(`/api/agents/connected/${computerId}`),
 
-  // Send command to agent PC
-  sendCommand: (computerId, action, params = {}) =>
-    api.post("/api/agents/command", { computerId, action, params }),
+  // Send command to agent PC (optional ip/mac when computerId unknown — server resolves online agent)
+  sendCommand: (computerId, action, params = {}, meta = {}) => {
+    const body = { action, params: params ?? {} };
+    if (computerId) body.computerId = computerId;
+    if (meta.ip) body.ip = meta.ip;
+    if (meta.mac) body.mac = meta.mac;
+    return api.post("/api/agents/command", body);
+  },
 
   // Generate agent installer
   createInstaller: (room, serverUrl, computerName) =>

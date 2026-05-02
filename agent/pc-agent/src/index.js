@@ -124,13 +124,30 @@ class PCAgent {
         si.users()
       ]);
 
-      // Get active network interface
-      const activeInterface = network.find(ni => 
-        ni.ip4 && !ni.internal && ni.ip4.startsWith('192.168.')
-      ) || network.find(ni => ni.ip4 && !ni.internal);
+      // Collect non-loopback IPv4 addresses for primary IP + ipAddresses (scan/dashboard matching)
+      const ipv4Candidates = [];
+      for (const ni of network) {
+        if (!ni?.ip4) continue;
+        const a = String(ni.ip4).trim();
+        if (!a || a.startsWith('127.')) continue;
+        ipv4Candidates.push({ ip: a, mac: ni.mac || '00:00:00:00:00:00' });
+      }
 
-      const ip = activeInterface?.ip4 || '0.0.0.0';
-      const mac = activeInterface?.mac || '00:00:00:00:00:00';
+      const scoreIp = (addr) => {
+        if (addr.startsWith('192.168.')) return 300;
+        if (addr.startsWith('10.')) return 250;
+        if (/^172\.(1[6-9]|2\d|3[01])\./.test(addr)) return 200;
+        if (addr.startsWith('169.254.')) return 50;
+        return 100;
+      };
+
+      const uniqueIps = [...new Set(ipv4Candidates.map((c) => c.ip))].sort(
+        (x, y) => scoreIp(y) - scoreIp(x)
+      );
+
+      const ip = uniqueIps[0] || '0.0.0.0';
+      const primaryNi = ipv4Candidates.find((c) => c.ip === ip) || ipv4Candidates[0];
+      const mac = primaryNi?.mac || '00:00:00:00:00:00';
 
       // Get current logged-in user
       const currentUser = users.find(u => u.loggedIn) || users[0] || { user: os.userInfo().username };
@@ -144,6 +161,7 @@ class PCAgent {
         user: currentUser.user || 'Unknown',
         room: this.config.room,
         status: 'online',
+        ipAddresses: uniqueIps.length ? uniqueIps : ip !== '0.0.0.0' ? [ip] : [],
         os: `${osInfo.platform} ${osInfo.release}`,
         specs: {
           cpu: `${cpu.manufacturer} ${cpu.brand}`,
@@ -163,6 +181,7 @@ class PCAgent {
         hostname: os.hostname(),
         ip: '0.0.0.0',
         mac: '00:00:00:00:00:00',
+        ipAddresses: [],
         user: os.userInfo().username,
         room: this.config.room,
         status: 'online',
