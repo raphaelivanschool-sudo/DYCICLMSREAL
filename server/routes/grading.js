@@ -1,6 +1,7 @@
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import { processGrade } from '../utils/gradeComputer.js';
+import { recordActivity, clientIp, summarizePayload } from '../utils/activityLog.js';
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -74,6 +75,14 @@ router.post('/subjects', async (req, res) => {
         instructor: { select: { id: true, fullName: true } },
       },
     });
+
+    await recordActivity(prisma, {
+      userId: req.user.id,
+      action: 'GRADING_SUBJECT_CREATED',
+      description: `Subject "${subject.code}" ${subject.name} (${subject.yearSection}) id=${subject.id}`,
+      ipAddress: clientIp(req),
+    });
+
     res.status(201).json(subject);
   } catch (err) {
     console.error('Error creating subject:', err);
@@ -98,6 +107,14 @@ router.delete('/subjects/:id', async (req, res) => {
       where: { id: parseInt(req.params.id) },
       data:  { status: 'INACTIVE' },
     });
+
+    await recordActivity(prisma, {
+      userId: req.user.id,
+      action: 'GRADING_SUBJECT_DELETED',
+      description: `Subject id=${req.params.id} "${subject.code}" soft-deleted (inactive)`,
+      ipAddress: clientIp(req),
+    });
+
     res.json({ message: 'Subject removed successfully' });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -200,6 +217,14 @@ router.put('/grades/:gradeId', async (req, res) => {
       },
       include: { student: { select: { id: true, fullName: true, email: true } } },
     });
+
+    await recordActivity(prisma, {
+      userId: req.user.id,
+      action: 'GRADING_GRADE_UPDATED',
+      description: `Grade id=${gradeId} student=${updated.student?.fullName || ''} subject=${existing.subject?.code || ''} ${summarizePayload({ prelim, midterm, semiFinals, finals })}`,
+      ipAddress: clientIp(req),
+    });
+
     res.json(updated);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -265,6 +290,13 @@ router.post('/subjects/:subjectId/enroll', async (req, res) => {
       create: { subjectId, studentId: student.id },
       update: {},
       include: { student: { select: { id: true, fullName: true, email: true } } },
+    });
+
+    await recordActivity(prisma, {
+      userId: req.user.id,
+      action: 'GRADING_STUDENT_ENROLLED',
+      description: `Enrolled ${student.fullName} in subject ${subject.code} (${subjectId})`,
+      ipAddress: clientIp(req),
     });
 
     res.status(201).json({ message: 'Student enrolled successfully', grade });

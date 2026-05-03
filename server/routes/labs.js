@@ -1,6 +1,7 @@
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import { authenticateToken } from '../middleware/auth.js';
+import { recordActivity, clientIp } from '../utils/activityLog.js';
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -214,6 +215,13 @@ router.post('/', async (req, res) => {
       return { ...lab, computers };
     });
 
+    await recordActivity(prisma, {
+      userId: req.user.id,
+      action: 'LAB_CREATED',
+      description: `Laboratory "${result.name}" id=${result.id} with ${result.computers?.length || 0} computer slots`,
+      ipAddress: clientIp(req),
+    });
+
     res.status(201).json(result);
   } catch (error) {
     console.error('Error creating lab:', error);
@@ -360,6 +368,13 @@ router.put('/:id', async (req, res) => {
       response.warning = warning;
     }
 
+    await recordActivity(prisma, {
+      userId: req.user.id,
+      action: 'LAB_UPDATED',
+      description: `Laboratory id=${labId} "${response.name}" updated (computers: ${response.computerCount})`,
+      ipAddress: clientIp(req),
+    });
+
     res.json(response);
   } catch (error) {
     console.error('Error updating lab:', error);
@@ -394,6 +409,13 @@ router.delete('/:id', async (req, res) => {
     // Delete lab and all computers (cascade delete is set in schema)
     await prisma.laboratory.delete({
       where: { id: labId }
+    });
+
+    await recordActivity(prisma, {
+      userId: req.user.id,
+      action: 'LAB_DELETED',
+      description: `Deleted laboratory "${lab.name}" id=${labId} and ${computerCount} computer record(s)`,
+      ipAddress: clientIp(req),
     });
 
     res.json({ 

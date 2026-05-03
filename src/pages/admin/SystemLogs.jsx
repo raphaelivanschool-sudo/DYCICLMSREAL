@@ -48,6 +48,7 @@ function SystemLogs() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [exporting, setExporting] = useState(false);
 
   // Fetch logs from API
   const fetchLogs = async () => {
@@ -59,7 +60,8 @@ function SystemLogs() {
         page: 1,
         limit: 100,
         dateRange,
-        actionFilter: actionFilter === 'all' ? '' : actionFilter,
+        // Use explicit "all" — empty string was sent before and the API treated it as action=""
+        actionFilter: actionFilter === 'all' ? 'all' : actionFilter,
         searchTerm
       });
 
@@ -104,6 +106,60 @@ function SystemLogs() {
     return () => clearTimeout(timer);
   }, [searchTerm]);
 
+  const handleExportLogs = async () => {
+    const auth = getAuthToken();
+    if (!auth) {
+      alert('You must be signed in to export logs.');
+      return;
+    }
+    try {
+      setExporting(true);
+      const params = new URLSearchParams({
+        dateRange,
+        actionFilter: actionFilter === 'all' ? 'all' : actionFilter,
+        searchTerm,
+        statusFilter,
+      });
+      const response = await fetch(`${API_URL}/api/logs/export?${params}`, {
+        headers: { Authorization: auth },
+      });
+      if (!response.ok) {
+        let message = `Export failed (${response.status})`;
+        try {
+          const body = await response.json();
+          if (body?.message) message = body.message;
+        } catch {
+          /* response may not be JSON */
+        }
+        throw new Error(message);
+      }
+      const blob = await response.blob();
+      const disposition = response.headers.get('Content-Disposition');
+      let filename = `system-logs-${new Date().toISOString().slice(0, 10)}.csv`;
+      if (disposition) {
+        const utf8Name = /filename\*=UTF-8''([^;\s]+)/i.exec(disposition);
+        const quoted = /filename="([^"]+)"/i.exec(disposition);
+        const plain = /filename=([^;\s]+)/i.exec(disposition);
+        if (utf8Name) filename = decodeURIComponent(utf8Name[1]);
+        else if (quoted) filename = quoted[1];
+        else if (plain) filename = plain[1].replace(/^["']|["']$/g, '');
+      }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Export logs:', err);
+      alert(err instanceof Error ? err.message : 'Export failed.');
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const filteredLogs = logs.filter(log => {
     // Client-side filtering for status (since backend doesn't have status field)
     const matchesStatus = statusFilter === 'all' || 
@@ -133,11 +189,19 @@ function SystemLogs() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">System Logs & Reports</h1>
-          <p className="text-gray-500">Monitor all user actions, logins, and commands issued across laboratories</p>
+          <p className="text-gray-500">
+            Audit trail for logins, lab/inventory/ticket/grading changes, network scans, and remote PC commands (lock,
+            website block, Wi‑Fi, projection, etc.)
+          </p>
         </div>
-        <button className="flex items-center h-10 px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-md text-sm font-medium hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors">
-          <Download className="w-4 h-4 mr-2" />
-          Export Logs
+        <button
+          type="button"
+          onClick={handleExportLogs}
+          disabled={exporting}
+          className="flex items-center h-10 px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-md text-sm font-medium hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors disabled:opacity-50 disabled:pointer-events-none"
+        >
+          <Download className="w-4 h-4 mr-2 shrink-0" />
+          {exporting ? 'Exporting…' : 'Export Logs'}
         </button>
       </div>
 

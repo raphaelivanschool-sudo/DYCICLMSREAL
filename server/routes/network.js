@@ -2,7 +2,10 @@ import express from 'express';
 import rateLimit from 'express-rate-limit';
 import NetworkScanner from '../utils/network-scanner.js';
 import os from 'os';
+import { PrismaClient } from '@prisma/client';
+import { recordActivity, clientIp } from '../utils/activityLog.js';
 
+const prisma = new PrismaClient();
 const router = express.Router();
 
 // Rate limiting for network scans
@@ -95,6 +98,13 @@ router.post('/scan', scanLimiter, async (req, res) => {
       activeScans.delete(userId);
     });
 
+    await recordActivity(prisma, {
+      userId: req.user.id,
+      action: 'NETWORK_SCAN_STARTED',
+      description: `Network scan started range=${range || 'default'}`,
+      ipAddress: clientIp(req),
+    });
+
     res.json({
       message: 'Network scan started',
       scanId: userId
@@ -183,6 +193,13 @@ router.post('/server-scan', scanLimiter, async (req, res) => {
     activeScans.set(userId, scanPromise);
     scanPromise.finally(() => {
       activeScans.delete(userId);
+    });
+
+    await recordActivity(prisma, {
+      userId: req.user.id,
+      action: 'NETWORK_SERVER_SCAN_STARTED',
+      description: `Server multi-subnet scan: ${subnets.map((s) => `${s}.0/24`).join(', ')}`,
+      ipAddress: clientIp(req),
     });
 
     res.json({

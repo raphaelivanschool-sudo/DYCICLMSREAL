@@ -1,6 +1,7 @@
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import jwt from 'jsonwebtoken';
+import { recordActivity, clientIp } from '../utils/activityLog.js';
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -213,6 +214,13 @@ router.post('/', authenticateToken, async (req, res) => {
       }
     });
 
+    await recordActivity(prisma, {
+      userId: req.user.id,
+      action: 'TICKET_CREATED',
+      description: `Ticket ${ticket.ticketId} "${title}" created (pending approval)`,
+      ipAddress: clientIp(req),
+    });
+
     res.status(201).json(ticket);
   } catch (error) {
     console.error('Error creating ticket:', error);
@@ -277,6 +285,13 @@ router.put('/:id/approve', authenticateToken, async (req, res) => {
       }
     });
 
+    await recordActivity(prisma, {
+      userId: req.user.id,
+      action: 'TICKET_APPROVED',
+      description: `Ticket ${updatedTicket.ticketId} approved; assignedTo=${updatedTicket.assignedTo ?? ''}`,
+      ipAddress: clientIp(req),
+    });
+
     res.json(updatedTicket);
   } catch (error) {
     console.error('Error approving ticket:', error);
@@ -336,6 +351,13 @@ router.put('/:id/reject', authenticateToken, async (req, res) => {
           }
         }
       }
+    });
+
+    await recordActivity(prisma, {
+      userId: req.user.id,
+      action: 'TICKET_REJECTED',
+      description: `Ticket ${updatedTicket.ticketId} rejected: ${rejectionReason}`,
+      ipAddress: clientIp(req),
     });
 
     res.json(updatedTicket);
@@ -404,6 +426,13 @@ router.put('/:id/status', authenticateToken, async (req, res) => {
           }
         }
       }
+    });
+
+    await recordActivity(prisma, {
+      userId: req.user.id,
+      action: 'TICKET_STATUS_UPDATED',
+      description: `Ticket ${updatedTicket.ticketId} status → ${status}`,
+      ipAddress: clientIp(req),
     });
 
     res.json(updatedTicket);

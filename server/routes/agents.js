@@ -8,6 +8,11 @@ import {
   getPcAgentApiKey,
   getPcAgentConfigPathTried,
 } from '../utils/pcAgentAuth.js';
+import {
+  recordActivity,
+  clientIp,
+  summarizePayload,
+} from '../utils/activityLog.js';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -83,12 +88,18 @@ router.post('/wake', authenticateToken, async (req, res) => {
     const packet = createMagicPacket(mac);
     const socket = dgram.createSocket('udp4');
     
-    socket.send(packet, 9, '255.255.255.255', (err) => {
+    socket.send(packet, 9, '255.255.255.255', async (err) => {
       socket.close();
       if (err) {
         console.error('WoL error:', err);
         return res.status(500).json({ error: 'Failed to send wake packet' });
       }
+      await recordActivity(prisma, {
+        userId: req.user.id,
+        action: 'WAKE_ON_LAN',
+        description: `Wake-on-LAN magic packet sent for MAC ${mac}`,
+        ipAddress: clientIp(req),
+      });
       res.json({ ok: true, message: `Wake packet sent to ${mac}` });
     });
 
@@ -258,7 +269,7 @@ router.get('/connected/:computerId', authenticateToken, (req, res) => {
 });
 
 // Send command to agent PC (by computer UUID and/or client LAN IP / MAC)
-router.post('/command', authenticateToken, (req, res) => {
+router.post('/command', authenticateToken, async (req, res) => {
   try {
     const io = req.app.get('io');
     const connectedComputers = req.app.get('connectedComputers');
@@ -296,6 +307,13 @@ router.post('/command', authenticateToken, (req, res) => {
       params,
       from: req.user.id,
       timestamp: new Date(),
+    });
+
+    await recordActivity(prisma, {
+      userId: req.user.id,
+      action: 'AGENT_REMOTE_COMMAND',
+      description: `Remote agent command "${action}" → computer ${targetId} (ip=${ip || '—'} mac=${mac || '—'}) params=${summarizePayload(params)}`,
+      ipAddress: clientIp(req),
     });
 
     res.json({
@@ -468,6 +486,12 @@ router.post('/projection/stop', authenticateToken, async (req, res) => {
           error: `Guest agent HTTP ${guestResp.status}: ${detail}`,
         });
       }
+      await recordActivity(prisma, {
+        userId: req.user.id,
+        action: 'SCREEN_PROJECTION_STOP',
+        description: `Stopped screen projection to computer ${targetId} (${lanIp})`,
+        ipAddress: clientIp(req),
+      });
       return res.json({
         success: true,
         resolvedComputerId: targetId,
@@ -572,6 +596,13 @@ echo Room: ${room}
 echo ========================================
 pause
 `;
+
+    await recordActivity(prisma, {
+      userId: req.user.id,
+      action: 'AGENT_INSTALLER_GENERATED',
+      description: `Agent installer config for room "${room}" computerId=${config.computerId} serverUrl=${serverUrl}`,
+      ipAddress: clientIp(req),
+    });
 
     res.json({
       success: true,

@@ -1,6 +1,7 @@
 import express from "express";
 import { PrismaClient } from "@prisma/client";
 import { authenticateToken, requireRole } from "../middleware/auth.js";
+import { recordActivity, clientIp } from "../utils/activityLog.js";
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -266,6 +267,13 @@ router.post(
         },
       });
 
+      await recordActivity(prisma, {
+        userId: req.user.id,
+        action: "HARDWARE_INVENTORY_CREATED",
+        description: `Added "${name}" (${serialNumber}) lab id=${laboratoryId}`,
+        ipAddress: clientIp(req),
+      });
+
       res.status(201).json({
         success: true,
         data: newItem,
@@ -395,6 +403,13 @@ router.put(
         },
       });
 
+      await recordActivity(prisma, {
+        userId: req.user.id,
+        action: "HARDWARE_INVENTORY_UPDATED",
+        description: `Updated item id=${id} "${updatedItem.name}" (${updatedItem.serialNumber})`,
+        ipAddress: clientIp(req),
+      });
+
       res.json({
         success: true,
         data: updatedItem,
@@ -437,6 +452,13 @@ router.delete(
         where: {
           id: parseInt(id),
         },
+      });
+
+      await recordActivity(prisma, {
+        userId: req.user.id,
+        action: "HARDWARE_INVENTORY_DELETED",
+        description: `Deleted inventory "${existingItem.name}" SN=${existingItem.serialNumber} id=${id}`,
+        ipAddress: clientIp(req),
       });
 
       res.json({

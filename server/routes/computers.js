@@ -1,6 +1,7 @@
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import { authenticateToken } from '../middleware/auth.js';
+import { recordActivity, clientIp, summarizePayload } from '../utils/activityLog.js';
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -173,6 +174,13 @@ router.put('/:id', async (req, res) => {
       }
     });
 
+    await recordActivity(prisma, {
+      userId: req.user.id,
+      action: 'COMPUTER_UPDATED',
+      description: `Computer "${computer.name}" id=${computerId} lab="${computer.laboratory?.name}" fields=${summarizePayload(updateData)}`,
+      ipAddress: clientIp(req),
+    });
+
     res.json(computer);
   } catch (error) {
     console.error('Error updating computer:', error);
@@ -208,6 +216,13 @@ router.delete('/:id', async (req, res) => {
 
     await prisma.computer.delete({
       where: { id: computerId }
+    });
+
+    await recordActivity(prisma, {
+      userId: req.user.id,
+      action: 'COMPUTER_DELETED',
+      description: `Deleted computer "${computer.name}" id=${computerId}`,
+      ipAddress: clientIp(req),
     });
 
     res.json({ message: 'Computer deleted successfully' });
@@ -280,6 +295,13 @@ router.post('/:id/software', async (req, res) => {
       }
     });
 
+    await recordActivity(prisma, {
+      userId: req.user.id,
+      action: 'COMPUTER_SOFTWARE_ADDED',
+      description: `Added software "${software.softwareName}" to computer id=${computerId}`,
+      ipAddress: clientIp(req),
+    });
+
     res.status(201).json(software);
   } catch (error) {
     console.error('Error adding software:', error);
@@ -303,6 +325,13 @@ router.delete('/:id/software/:softwareId', async (req, res) => {
 
     await prisma.computerSoftware.delete({
       where: { id: sId }
+    });
+
+    await recordActivity(prisma, {
+      userId: req.user.id,
+      action: 'COMPUTER_SOFTWARE_REMOVED',
+      description: `Removed software record id=${sId} from computer id=${computerId}`,
+      ipAddress: clientIp(req),
     });
 
     res.json({ message: 'Software removed successfully' });
@@ -340,6 +369,13 @@ router.post('/bulk-update', async (req, res) => {
     const result = await prisma.computer.updateMany({
       where: { id: { in: validIds } },
       data: updateData
+    });
+
+    await recordActivity(prisma, {
+      userId: req.user.id,
+      action: 'COMPUTER_BULK_UPDATED',
+      description: `Bulk-updated ${result.count} computer(s) ids=[${validIds.join(',')}] ${summarizePayload(updateData)}`,
+      ipAddress: clientIp(req),
     });
 
     res.json({ 
