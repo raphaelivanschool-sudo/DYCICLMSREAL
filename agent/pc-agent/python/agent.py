@@ -554,6 +554,7 @@ def create_app(config: AgentConfig, logger: logging.Logger) -> Flask:
             accepted = _ask_projection_consent(sender_hostname=sender, timeout_seconds=25)
             if not accepted:
                 return jsonify({"accepted": False, "error": "Guest denied screen-share request"}), 403
+            _ensure_projection_ui(logger)
             return jsonify({"accepted": True}), 200
         except Exception as e:
             logger.error("project_request failed: %s\n%s", e, traceback.format_exc())

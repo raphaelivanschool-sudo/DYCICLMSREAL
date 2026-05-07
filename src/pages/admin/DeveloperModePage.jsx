@@ -283,19 +283,6 @@ function DeveloperModePage() {
       setProjectionStatus('✗ Projection already running.');
       return;
     }
-    setProjectionStatus('Opening projection window on target PC...');
-
-    try {
-      const agentId = selectedDevice?.agentId;
-      const ip = selectedDevice?.ip;
-      const mac = selectedDevice?.mac;
-      await agentsApi.openProjectionWindow(agentId, { ip, mac });
-    } catch (e) {
-      const msg = e.response?.data?.error || e.message || 'Could not open target projection window';
-      setProjectionStatus(`✗ ${msg}`);
-      return;
-    }
-
     setProjectionStatus('Select a window/screen to share...');
 
     let stream;
@@ -306,6 +293,27 @@ function DeveloperModePage() {
       });
     } catch (e) {
       setProjectionStatus(`✗ Screen share cancelled or denied: ${e?.message || e}`);
+      return;
+    }
+
+    // Keep user-gesture-safe ordering: open browser picker first, then guest consent popup.
+    try {
+      const agentId = selectedDevice?.agentId;
+      const ip = selectedDevice?.ip;
+      const mac = selectedDevice?.mac;
+      setProjectionStatus('Waiting for target PC confirmation popup...');
+      await agentsApi.requestProjectionPermission(
+        agentId,
+        { sender_hostname: window.location.hostname || 'dyci-host' },
+        { ip, mac }
+      );
+      // Backward compatibility for older guest agents that don't open the UI on accept.
+      await agentsApi.openProjectionWindow(agentId, { ip, mac });
+      setProjectionStatus('Target accepted. Starting projection...');
+    } catch (e) {
+      const msg = e.response?.data?.error || e.message || 'Target did not accept projection request';
+      stream.getTracks().forEach((t) => t.stop());
+      setProjectionStatus(`✗ ${msg}`);
       return;
     }
 
