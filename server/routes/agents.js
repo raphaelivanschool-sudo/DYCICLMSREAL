@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { PrismaClient } from '@prisma/client';
 import dgram from 'dgram';
 import axios from 'axios';
+import os from 'os';
+import { spawn } from 'child_process';
 import { authenticateToken } from '../middleware/auth.js';
 import { pickAgentTargetId, resolveLanIpForPcAgent } from '../utils/agentLookup.js';
 import {
@@ -16,6 +18,99 @@ import {
 
 const router = Router();
 const prisma = new PrismaClient();
+const HOST_RTSP_PORT = parseInt(process.env.HOST_RTSP_PORT || '8554', 10);
+const HOST_RTSP_PATH = (process.env.HOST_RTSP_PATH || 'stream').replace(/^\//, '');
+let hostRtspProcess = null;
+let hostRtspUrl = '';
+
+function getServerLanCandidates() {
+  const interfaces = os.networkInterfaces();
+  const ips = [];
+  for (const name of Object.keys(interfaces)) {
+    for (const iface of interfaces[name] || []) {
+      if (iface.family === 'IPv4' && !iface.internal && iface.address) {
+        ips.push(iface.address);
+      }
+    }
+  }
+  return ips;
+}
+
+function pickServerIpForTarget(targetIp) {
+  const ips = getServerLanCandidates();
+  if (!ips.length) return '127.0.0.1';
+  if (targetIp) {
+    const targetParts = String(targetIp).split('.');
+    if (targetParts.length === 4) {
+      const match = ips.find((ip) => {
+        const p = ip.split('.');
+        return p.length === 4 && p[0] === targetParts[0] && p[1] === targetParts[1] && p[2] === targetParts[2];
+      });
+      if (match) return match;
+    }
+  }
+  return ips[0];
+}
+
+function startHostRtspStream(hostIp) {
+  if (hostRtspProcess && hostRtspProcess.exitCode == null) {
+    return hostRtspUrl;
+  }
+  const url = `rtsp://0.0.0.0:${HOST_RTSP_PORT}/${HOST_RTSP_PATH}`;
+  const cmd = [
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    '-f',
+    'gdigrab',
+    '-framerate',
+    '30',
+    '-i',
+    'desktop',
+    '-an',
+    '-c:v',
+    'libx264',
+    '-preset',
+    'ultrafast',
+    '-tune',
+    'zerolatency',
+    '-pix_fmt',
+    'yuv420p',
+    '-b:v',
+    '8M',
+    '-f',
+    'rtsp',
+    '-rtsp_transport',
+    'tcp',
+    '-rtsp_flags',
+    'listen',
+    url,
+  ];
+  hostRtspProcess = spawn('ffmpeg', cmd, {
+    stdio: ['ignore', 'ignore', 'pipe'],
+    windowsHide: true,
+  });
+  hostRtspProcess.stderr?.on('data', () => {
+    // keep drained; errors are surfaced when guest fails to connect.
+  });
+  hostRtspProcess.on('exit', () => {
+    hostRtspProcess = null;
+    hostRtspUrl = '';
+  });
+  hostRtspUrl = `rtsp://${hostIp}:${HOST_RTSP_PORT}/${HOST_RTSP_PATH}`;
+  return hostRtspUrl;
+}
+
+function stopHostRtspStream() {
+  if (!hostRtspProcess) return;
+  try {
+    hostRtspProcess.kill('SIGTERM');
+  } catch {
+    // ignore
+  }
+  hostRtspProcess = null;
+  hostRtspUrl = '';
+}
 
 // Helper to create WoL magic packet
 function createMagicPacket(mac) {
@@ -674,10 +769,6 @@ router.post('/stream/start', authenticateToken, async (req, res) => {
     const connectedComputers = req.app.get('connectedComputers');
     const { computerId, ip, mac, stream_url, sender_hostname, fps, codec } = req.body || {};
 
-    if (!stream_url || typeof stream_url !== 'string') {
-      return res.status(400).json({ success: false, error: 'stream_url is required' });
-    }
-
     const { targetId, strategy } = pickAgentTargetId(connectedComputers, {
       computerId,
       ip,
@@ -696,6 +787,19 @@ router.post('/stream/start', authenticateToken, async (req, res) => {
         success: false,
         error: 'Could not resolve LAN IP for the guest agent.',
       });
+    }
+
+    const hostIp = pickServerIpForTarget(lanIp);
+    let effectiveStreamUrl = stream_url;
+    if (!effectiveStreamUrl) {
+      try {
+        effectiveStreamUrl = startHostRtspStream(hostIp);
+      } catch (e) {
+        return res.status(500).json({
+          success: false,
+          error: `Failed to start host RTSP stream: ${e.message || e}`,
+        });
+      }
     }
 
     const url = `http://${lanIp}:${PC_AGENT_PORT}/stream`;
@@ -738,7 +842,7 @@ router.post('/stream/start', authenticateToken, async (req, res) => {
       guestResp = await axios.post(
         url,
         {
-          stream_url,
+          stream_url: effectiveStreamUrl,
           sender_hostname: sender_hostname || 'dyci-host',
           fps: typeof fps === 'number' ? fps : 30,
           codec: codec || 'h264',
@@ -773,6 +877,7 @@ router.post('/stream/start', authenticateToken, async (req, res) => {
 
     return res.json({
       success: true,
+      streamUrl: effectiveStreamUrl,
       resolvedComputerId: targetId,
       resolutionStrategy: strategy,
       forwardedTo: url,
@@ -843,6 +948,17 @@ router.post('/stream/stop', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('[agents/stream/stop]', error);
     res.status(500).json({ success: false, error: 'Stop stream failed' });
+  }
+});
+
+/** Stop host-side RTSP broadcaster process (ffmpeg gdigrab). */
+router.post('/stream/host/stop', authenticateToken, async (_req, res) => {
+  try {
+    stopHostRtspStream();
+    return res.json({ success: true, status: 'stopped' });
+  } catch (error) {
+    console.error('[agents/stream/host/stop]', error);
+    return res.status(500).json({ success: false, error: 'Failed to stop host RTSP stream' });
   }
 });
 

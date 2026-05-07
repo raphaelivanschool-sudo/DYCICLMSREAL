@@ -198,6 +198,8 @@ export const agentsApi = {
     if (meta.mac) body.mac = meta.mac;
     return api.post("/api/agents/stream/stop", body);
   },
+
+  stopHostRtspStream: () => api.post("/api/agents/stream/host/stop", {}),
 };
 
 export default api;

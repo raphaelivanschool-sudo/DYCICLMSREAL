@@ -42,6 +42,8 @@ class PCAgent {
     this.DISCOVERY_PORT = 41234;
     this.DISCOVERY_INTERVAL = 30000; // 30 seconds
     this.vncPort = 5900;
+    this.pythonProjectionProcess = null;
+    this.pythonProjectionRestartTimer = null;
   }
 
   createLogger() {
@@ -378,6 +380,85 @@ class PCAgent {
     } catch (error) {
       this.logger.error('Connection error:', error);
       this.scheduleReconnect();
+    }
+  }
+
+  resolvePythonLauncher() {
+    if (process.platform !== 'win32') return null;
+    const candidates = [
+      { cmd: 'python', args: [] },
+      { cmd: 'py', args: ['-3'] },
+    ];
+    return candidates;
+  }
+
+  startPythonProjectionAgent() {
+    if (process.platform !== 'win32') {
+      this.logger.info('Skipping Python projection agent startup (non-Windows)');
+      return;
+    }
+    if (this.pythonProjectionProcess && !this.pythonProjectionProcess.killed) {
+      return;
+    }
+
+    const pythonAgentDir = path.join(__dirname, '..', 'python');
+    const pythonAgentPath = path.join(pythonAgentDir, 'agent.py');
+    if (!fs.existsSync(pythonAgentPath)) {
+      this.logger.info(`Python projection agent not found: ${pythonAgentPath}`);
+      return;
+    }
+
+    const launchers = this.resolvePythonLauncher() || [];
+    for (const launcher of launchers) {
+      try {
+        const args = [...launcher.args, pythonAgentPath];
+        const child = spawn(launcher.cmd, args, {
+          cwd: pythonAgentDir,
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        this.pythonProjectionProcess = child;
+        this.logger.info(`Started Python projection agent via ${launcher.cmd} ${launcher.args.join(' ')}`.trim());
+
+        child.stdout?.on('data', (d) => {
+          const msg = String(d || '').trim();
+          if (msg) this.logger.debug(`[python-agent] ${msg}`);
+        });
+        child.stderr?.on('data', (d) => {
+          const msg = String(d || '').trim();
+          if (msg) this.logger.debug(`[python-agent-err] ${msg}`);
+        });
+        child.on('exit', (code) => {
+          this.logger.error(`Python projection agent exited (code=${code})`);
+          this.pythonProjectionProcess = null;
+          if (this.pythonProjectionRestartTimer) {
+            clearTimeout(this.pythonProjectionRestartTimer);
+          }
+          this.pythonProjectionRestartTimer = setTimeout(() => {
+            this.startPythonProjectionAgent();
+          }, 5000);
+        });
+        return;
+      } catch (error) {
+        this.logger.error(`Failed launching Python projection agent via ${launcher.cmd}:`, error);
+      }
+    }
+
+    this.logger.error('Could not launch Python projection agent. Install Python 3 or add python/py to PATH.');
+  }
+
+  stopPythonProjectionAgent() {
+    if (this.pythonProjectionRestartTimer) {
+      clearTimeout(this.pythonProjectionRestartTimer);
+      this.pythonProjectionRestartTimer = null;
+    }
+    if (this.pythonProjectionProcess) {
+      try {
+        this.pythonProjectionProcess.kill();
+      } catch {
+        // ignore
+      }
+      this.pythonProjectionProcess = null;
     }
   }
 
@@ -836,6 +917,9 @@ class PCAgent {
     // Create Windows Firewall rule (requires admin)
     await this.createFirewallRule();
 
+    // Start Python projection API agent (host->guest projection popup/fullscreen).
+    this.startPythonProjectionAgent();
+
     // Connect to server
     await this.connect();
 
@@ -877,6 +961,7 @@ class PCAgent {
     }
 
     this.stopVNC().catch(() => {});
+    this.stopPythonProjectionAgent();
 
     setTimeout(() => {
       process.exit(0);

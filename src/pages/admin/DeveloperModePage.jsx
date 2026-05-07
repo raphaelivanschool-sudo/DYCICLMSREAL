@@ -6,7 +6,9 @@ import socketService from '../../services/socketService.js';
 
 const RESULT_TIMEOUT_MS = 90000;
 const SCREENSHOT_AUTO_MS = 3000;
-const PROJECTION_INTERVAL_MS = 2000;
+// Interval for sending JPEG frames to the guest agent (~10 FPS).
+// (This is the proven "projection" path; RTSP/H.264 is separate and currently more fragile.)
+const PROJECTION_INTERVAL_MS = 100;
 const SCAN_POLL_MS = 1500;
 
 function blobToBase64(blob) {
@@ -296,27 +298,6 @@ function DeveloperModePage() {
       return;
     }
 
-    // Keep user-gesture-safe ordering: open browser picker first, then guest consent popup.
-    try {
-      const agentId = selectedDevice?.agentId;
-      const ip = selectedDevice?.ip;
-      const mac = selectedDevice?.mac;
-      setProjectionStatus('Waiting for target PC confirmation popup...');
-      await agentsApi.requestProjectionPermission(
-        agentId,
-        { sender_hostname: window.location.hostname || 'dyci-host' },
-        { ip, mac }
-      );
-      // Backward compatibility for older guest agents that don't open the UI on accept.
-      await agentsApi.openProjectionWindow(agentId, { ip, mac });
-      setProjectionStatus('Target accepted. Starting projection...');
-    } catch (e) {
-      const msg = e.response?.data?.error || e.message || 'Target did not accept projection request';
-      stream.getTracks().forEach((t) => t.stop());
-      setProjectionStatus(`✗ ${msg}`);
-      return;
-    }
-
     const video = document.createElement('video');
     video.playsInline = true;
     video.muted = true;
@@ -334,11 +315,32 @@ function DeveloperModePage() {
     projectionStreamRef.current = { stream, video, canvas, ctx };
     projectionRunningRef.current = true;
     setProjectionActive(true);
-    setProjectionStatus('🖥️ Streaming…');
 
     const agentId = selectedDevice?.agentId;
     const ip = selectedDevice?.ip;
     const mac = selectedDevice?.mac;
+
+    try {
+      setProjectionStatus('Waiting for target PC confirmation popup...');
+      await agentsApi.requestProjectionPermission(
+        agentId,
+        { sender_hostname: window.location.hostname || 'dyci-host' },
+        { ip, mac }
+      );
+      // For older guest agents that don't open UI on accept, open it best-effort.
+      try {
+        await agentsApi.openProjectionWindow(agentId, { ip, mac });
+      } catch {
+        // ignore
+      }
+    } catch (e) {
+      stream.getTracks().forEach((t) => t.stop());
+      projectionRunningRef.current = false;
+      setProjectionActive(false);
+      const msg = e.response?.data?.error || e.message || 'Target did not accept projection request';
+      setProjectionStatus(`✗ ${msg}`);
+      return;
+    }
 
     const sendFrame = async () => {
       if (!projectionRunningRef.current || !projectionStreamRef.current) return;
@@ -346,6 +348,7 @@ function DeveloperModePage() {
       const vw = v.videoWidth;
       const vh = v.videoHeight;
       if (!vw || !vh) return;
+
       const maxW = 1280;
       const maxH = 720;
       let tw = vw;
@@ -355,12 +358,15 @@ function DeveloperModePage() {
         tw = Math.round(tw * scale);
         th = Math.round(th * scale);
       }
+
       c.width = tw;
       c.height = th;
       cctx.drawImage(v, 0, 0, tw, th);
+
       const blob = await new Promise((res) => c.toBlob(res, 'image/jpeg', 0.52));
       if (!blob || !projectionRunningRef.current) return;
       const b64 = await blobToBase64(blob);
+
       await agentsApi.sendProjectionFrame(
         agentId,
         {
@@ -372,6 +378,7 @@ function DeveloperModePage() {
       );
     };
 
+    setProjectionStatus('🖥️ Streaming…');
     try {
       await sendFrame();
     } catch (e) {
