@@ -151,6 +151,14 @@ export const agentsApi = {
   wakeOnLAN: (mac) => api.post("/api/agents/wake", { mac }),
 
   /** Host→guest screen projection (server forwards to Flask agent /project on port 5555). */
+  openProjectionWindow: (computerId, meta = {}) => {
+    const body = {};
+    if (computerId) body.computerId = computerId;
+    if (meta.ip) body.ip = meta.ip;
+    if (meta.mac) body.mac = meta.mac;
+    return api.post("/api/agents/projection/open", body);
+  },
+
   sendProjectionFrame: (computerId, payload = {}, meta = {}) => {
     const body = { ...payload };
     if (computerId) body.computerId = computerId;

@@ -531,6 +531,17 @@ def create_app(config: AgentConfig, logger: logging.Logger) -> Flask:
             logger.error("project failed: %s\n%s", e, traceback.format_exc())
             return jsonify({"error": "projection failed"}), 500
 
+    @app.post("/project_open")
+    @auth_required
+    def project_open_ep() -> Tuple[Response, int]:
+        """Open projection window immediately on guest PC."""
+        try:
+            _ensure_projection_ui(logger)
+            return jsonify({"status": "opened"}), 200
+        except Exception as e:
+            logger.error("project_open failed: %s\n%s", e, traceback.format_exc())
+            return jsonify({"error": "projection open failed"}), 500
+
     @app.post("/project_request")
     @auth_required
     def project_request_ep() -> Tuple[Response, int]:

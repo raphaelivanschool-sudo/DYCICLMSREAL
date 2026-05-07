@@ -7,7 +7,6 @@ import socketService from '../../services/socketService.js';
 const RESULT_TIMEOUT_MS = 90000;
 const SCREENSHOT_AUTO_MS = 3000;
 const PROJECTION_INTERVAL_MS = 2000;
-const STREAM_INTERVAL_MS = 1000 / 30;
 const SCAN_POLL_MS = 1500;
 
 function blobToBase64(blob) {
@@ -72,11 +71,6 @@ function DeveloperModePage() {
   const [autoRefreshScreenshot, setAutoRefreshScreenshot] = useState(false);
   const [projectionActive, setProjectionActive] = useState(false);
   const [projectionStatus, setProjectionStatus] = useState('');
-  const [streamingActive, setStreamingActive] = useState(false);
-  const [streamingStatus, setStreamingStatus] = useState('');
-  const streamingRunningRef = useRef(false);
-  const streamingIntervalRef = useRef(null);
-  const streamingStreamRef = useRef(null);
   const projectionRunningRef = useRef(false);
   const projectionIntervalRef = useRef(null);
   const projectionStreamRef = useRef(null);
@@ -289,34 +283,25 @@ function DeveloperModePage() {
       setProjectionStatus('✗ Projection already running.');
       return;
     }
-    const confirmed = window.confirm(
-      'Project your shared screen onto the selected guest PC?\n\n' +
-        'You will pick which display/window to share.\n' +
-        'The server forwards frames to the guest Python agent (HTTP port 5555). ' +
-        'Set PC_AGENT_API_KEY in server/.env to match the guest agent_config.json api_key.'
-    );
-    if (!confirmed) return;
+    setProjectionStatus('Opening projection window on target PC...');
 
     try {
       const agentId = selectedDevice?.agentId;
       const ip = selectedDevice?.ip;
       const mac = selectedDevice?.mac;
-      await agentsApi.requestProjectionPermission(
-        agentId,
-        { sender_hostname: window.location.hostname || 'dyci-host' },
-        { ip, mac }
-      );
-      setProjectionStatus('Waiting for guest accepted popup... starting stream');
+      await agentsApi.openProjectionWindow(agentId, { ip, mac });
     } catch (e) {
-      const msg = e.response?.data?.error || e.message || 'Guest did not accept screen-share request';
+      const msg = e.response?.data?.error || e.message || 'Could not open target projection window';
       setProjectionStatus(`✗ ${msg}`);
       return;
     }
 
+    setProjectionStatus('Select a window/screen to share...');
+
     let stream;
     try {
       stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: 5 },
+        video: { frameRate: 15 },
         audio: false,
       });
     } catch (e) {
@@ -401,174 +386,6 @@ function DeveloperModePage() {
     });
   }, [selectedDevice?.agentId, selectedDevice?.ip, selectedDevice?.mac, stopHostProjection]);
 
-  const startRtspStream = useCallback(async () => {
-    if (!selectedDevice?.ip) {
-      setStreamingStatus('✗ Select a PC with an IP first.');
-      return;
-    }
-    if (streamingRunningRef.current) {
-      setStreamingStatus('✗ Stream is already active.');
-      return;
-    }
-
-    if (!navigator.mediaDevices?.getDisplayMedia) {
-      setStreamingStatus('✗ Screen capture is not supported in this browser.');
-      return;
-    }
-
-    const confirmed = window.confirm(
-      'Start real-time screen streaming to the selected guest PC?\n\n' +
-        'This uses the same proven transport as "Project my screen", but at ~30 FPS.'
-    );
-    if (!confirmed) return;
-
-    try {
-      const agentId = selectedDevice?.agentId;
-      const ip = selectedDevice?.ip;
-      const mac = selectedDevice?.mac;
-      await agentsApi.requestProjectionPermission(
-        agentId,
-        { sender_hostname: window.location.hostname || 'dyci-host' },
-        { ip, mac }
-      );
-      setStreamingStatus('Waiting for guest accepted popup... starting stream');
-    } catch (e) {
-      const msg = e.response?.data?.error || e.message || 'Guest did not accept screen-share request';
-      setStreamingStatus(`✗ ${msg}`);
-      return;
-    }
-
-    let stream;
-    try {
-      stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: 30 },
-        audio: false,
-      });
-    } catch (e) {
-      setStreamingStatus(`✗ Screen share cancelled or denied: ${e?.message || e}`);
-      return;
-    }
-
-    const video = document.createElement('video');
-    video.playsInline = true;
-    video.muted = true;
-    video.srcObject = stream;
-    try {
-      await video.play();
-    } catch (e) {
-      stream.getTracks().forEach((t) => t.stop());
-      setStreamingStatus(`✗ Could not start capture: ${e?.message || e}`);
-      return;
-    }
-
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    streamingStreamRef.current = { stream, video, canvas, ctx };
-    streamingRunningRef.current = true;
-    setStreamingActive(true);
-    setStreamingStatus('🎬 Streaming live @ ~30 FPS');
-
-    const agentId = selectedDevice?.agentId;
-    const ip = selectedDevice?.ip;
-    const mac = selectedDevice?.mac;
-
-    const sendFrame = async () => {
-      if (!streamingRunningRef.current || !streamingStreamRef.current) return;
-      const { video: v, canvas: c, ctx: cctx } = streamingStreamRef.current;
-      const vw = v.videoWidth;
-      const vh = v.videoHeight;
-      if (!vw || !vh) return;
-
-      const maxW = 1280;
-      const maxH = 720;
-      let tw = vw;
-      let th = vh;
-      if (tw > maxW || th > maxH) {
-        const scale = Math.min(maxW / tw, maxH / th);
-        tw = Math.round(tw * scale);
-        th = Math.round(th * scale);
-      }
-
-      c.width = tw;
-      c.height = th;
-      cctx.drawImage(v, 0, 0, tw, th);
-      const blob = await new Promise((res) => c.toBlob(res, 'image/jpeg', 0.62));
-      if (!blob || !streamingRunningRef.current) return;
-      const b64 = await blobToBase64(blob);
-
-      await agentsApi.sendProjectionFrame(
-        agentId,
-        {
-          screenshot: b64,
-          sender_hostname: typeof window !== 'undefined' ? window.location.hostname || 'browser' : 'browser',
-          timestamp: new Date().toISOString(),
-        },
-        { ip, mac }
-      );
-    };
-
-    try {
-      await sendFrame();
-    } catch (e) {
-      const msg = e.response?.data?.error || e.message || 'Initial stream frame failed';
-      setStreamingStatus(`✗ ${msg}`);
-      streamingRunningRef.current = false;
-      if (streamingIntervalRef.current != null) {
-        window.clearInterval(streamingIntervalRef.current);
-        streamingIntervalRef.current = null;
-      }
-      const failPack = streamingStreamRef.current;
-      streamingStreamRef.current = null;
-      if (failPack?.stream) {
-        failPack.stream.getTracks().forEach((t) => t.stop());
-      }
-      setStreamingActive(false);
-      return;
-    }
-
-    streamingIntervalRef.current = window.setInterval(() => {
-      sendFrame().catch((e) => {
-        const msg = e.response?.data?.error || e.message || 'Send failed';
-        setStreamingStatus(`✗ ${msg}`);
-      });
-    }, STREAM_INTERVAL_MS);
-
-    const track = stream.getVideoTracks()[0];
-    track?.addEventListener('ended', () => {
-      stopRtspStream();
-    });
-  }, [selectedDevice?.agentId, selectedDevice?.ip, selectedDevice?.mac]);
-
-  const stopRtspStream = useCallback(async () => {
-    streamingRunningRef.current = false;
-    if (streamingIntervalRef.current != null) {
-      window.clearInterval(streamingIntervalRef.current);
-      streamingIntervalRef.current = null;
-    }
-    const pack = streamingStreamRef.current;
-    streamingStreamRef.current = null;
-    if (pack?.stream) {
-      pack.stream.getTracks().forEach((t) => t.stop());
-    }
-    setStreamingActive(false);
-
-    const ip = selectedDevice?.ip;
-    if (!ip) {
-      setStreamingStatus('');
-      return;
-    }
-    try {
-      const agentId = selectedDevice?.agentId;
-      const mac = selectedDevice?.mac;
-      // Compatibility path: stop guest projection viewer that was used for continuous stream frames.
-      await agentsApi.stopProjectionHttp(agentId, { ip, mac });
-      setStreamingStatus('✓ Stream stopped on guest');
-    } catch (e) {
-      const msg = e.response?.data?.error || e.message || 'Stop stream failed';
-      setStreamingStatus(`✗ ${msg}`);
-    }
-  }, [selectedDevice?.agentId, selectedDevice?.ip, selectedDevice?.mac]);
-
   useEffect(() => {
     return () => {
       projectionRunningRef.current = false;
@@ -580,24 +397,8 @@ function DeveloperModePage() {
       if (pack?.stream) {
         pack.stream.getTracks().forEach((t) => t.stop());
       }
-      streamingRunningRef.current = false;
-      if (streamingIntervalRef.current != null) {
-        window.clearInterval(streamingIntervalRef.current);
-        streamingIntervalRef.current = null;
-      }
-      const streamPack = streamingStreamRef.current;
-      if (streamPack?.stream) {
-        streamPack.stream.getTracks().forEach((t) => t.stop());
-      }
-      streamingStreamRef.current = null;
-      setStreamingActive(false);
     };
   }, []);
-
-  useEffect(() => {
-    setStreamingActive(false);
-    setStreamingStatus('');
-  }, [selectedIp]);
 
   const runDiscovery = async () => {
     setDiscovering(true);
@@ -961,22 +762,6 @@ function DeveloperModePage() {
                 >
                   ⏹️ Stop projection
                 </button>
-                <button
-                  type="button"
-                  onClick={startRtspStream}
-                  disabled={!selectedDevice?.ip || streamingActive}
-                  className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm text-white bg-fuchsia-600 hover:bg-fuchsia-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  🎬 Stream to PC
-                </button>
-                <button
-                  type="button"
-                  onClick={stopRtspStream}
-                  disabled={!streamingActive}
-                  className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm text-white bg-slate-700 hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  ⏹️ Stop stream
-                </button>
               </div>
             </div>
 
@@ -1007,15 +792,6 @@ function DeveloperModePage() {
                 }`}
               >
                 {projectionStatus}
-              </p>
-            )}
-            {streamingStatus && (
-              <p
-                className={`text-sm ${
-                  streamingStatus.startsWith('✗') ? 'text-red-700' : 'text-fuchsia-900'
-                }`}
-              >
-                {streamingStatus}
               </p>
             )}
             <p className="text-xs text-gray-500 max-w-3xl">
