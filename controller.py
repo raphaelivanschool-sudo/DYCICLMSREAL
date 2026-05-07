@@ -21,6 +21,7 @@ from tkinter import messagebox, simpledialog, ttk
 from PIL import Image, ImageTk
 
 from controller_config import ControllerConfig, KnownPC
+from video_streamer import RTSPServer, ScreenCapturer, StreamSession, VideoEncoder, get_local_ip_for_target, streaming_thread
 
 
 APP_TITLE = "PC CONTROLLER v1.0"
@@ -286,8 +287,20 @@ class AgentClient:
             json_body=json_body,
         )
 
+    def post_project_request(self, ip: str, api_key: str, json_body: Dict[str, Any]) -> requests.Response:
+        url = f"{self._base_url(ip)}/project_request"
+        return self._request("POST", url, api_key=api_key, timeout=STATUS_TIMEOUT_S, json_body=json_body)
+
     def post_stop_projection(self, ip: str, api_key: str) -> requests.Response:
         url = f"{self._base_url(ip)}/stop_projection"
+        return self._request("POST", url, api_key=api_key, timeout=STATUS_TIMEOUT_S)
+
+    def post_stream(self, ip: str, api_key: str, json_body: Dict[str, Any]) -> requests.Response:
+        url = f"{self._base_url(ip)}/stream"
+        return self._request("POST", url, api_key=api_key, timeout=STATUS_TIMEOUT_S, json_body=json_body)
+
+    def post_stop_stream(self, ip: str, api_key: str) -> requests.Response:
+        url = f"{self._base_url(ip)}/stop_stream"
         return self._request("POST", url, api_key=api_key, timeout=STATUS_TIMEOUT_S)
 
 
@@ -442,6 +455,8 @@ class ControllerApp:
         self.projection_active: Dict[str, bool] = {}
         self.projection_threads: Dict[str, threading.Thread] = {}
         self.projection_lock = threading.Lock()
+        self.stream_sessions: Dict[str, StreamSession] = {}
+        self.stream_lock = threading.Lock()
 
         self._build_ui()
         self._bind_shortcuts()
@@ -586,10 +601,16 @@ class ControllerApp:
             btns, text="⏹️ Stop Projection", command=self.stop_projection_click, state=tk.DISABLED
         )
         self.stop_projection_button.pack(side=tk.LEFT, padx=(0, 6))
+        self.stream_button = ttk.Button(btns, text="🎬 Stream to PC", command=self.start_streaming, state=tk.DISABLED)
+        self.stream_button.pack(side=tk.LEFT, padx=(0, 6))
+        self.stop_stream_button = ttk.Button(btns, text="⏹️ Stop Stream", command=self.stop_streaming, state=tk.DISABLED)
+        self.stop_stream_button.pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(btns, text="Settings", command=self.open_settings).pack(side=tk.RIGHT)
 
         self.projection_status_label = ttk.Label(self.right, text="Projection: idle", anchor="w")
         self.projection_status_label.pack(fill=tk.X, pady=(0, 8))
+        self.streaming_status_label = ttk.Label(self.right, text="Streaming: idle", anchor="w")
+        self.streaming_status_label.pack(fill=tk.X, pady=(0, 8))
 
         history = ttk.Frame(self.right)
         history.pack(fill=tk.X)
@@ -599,6 +620,7 @@ class ControllerApp:
 
         self._sync_refresh_button_state()
         self._sync_projection_controls()
+        self._sync_stream_controls()
 
     def _bind_shortcuts(self) -> None:
         self.root.bind_all("<Control-r>", lambda e: self.refresh_screenshot())
@@ -795,6 +817,7 @@ class ControllerApp:
             self.screenshot_meta.configure(text="")
             self._sync_refresh_button_state()
             self._sync_projection_controls()
+            self._sync_stream_controls()
             return
         ip = sel[0]
         if ip != self._last_selected_ip_snapshot:
@@ -806,6 +829,7 @@ class ControllerApp:
             self.screenshot_status_line.configure(text=f"Selected: {item.display_name()} ({item.ip})")
         self._sync_refresh_button_state()
         self._sync_projection_controls()
+        self._sync_stream_controls()
         self._set_status(f"Selected {ip}")
 
     def _on_refresh_tooltip_enter(self, event: tk.Event) -> None:
@@ -852,6 +876,33 @@ class ControllerApp:
         self.project_button.config(state=tk.NORMAL if (can and not active_here) else tk.DISABLED)
         self.stop_projection_button.config(state=tk.NORMAL if (can and active_here) else tk.DISABLED)
 
+    def _sync_stream_controls(self) -> None:
+        if not getattr(self, "stream_button", None):
+            return
+        ip = self._selected_ip
+        item = self.items.get(ip) if ip else None
+        can = bool(ip and item and item.api_key)
+        with self.stream_lock:
+            active_here = ip in self.stream_sessions if ip else False
+            active_count = len(self.stream_sessions)
+        if active_count == 0:
+            line = "Streaming: idle"
+        elif active_here:
+            line = f"Streaming: live to {item.display_name() if item else ip}"
+        elif active_count == 1:
+            with self.stream_lock:
+                only_ip = next(iter(self.stream_sessions.keys()))
+            only_item = self.items.get(only_ip)
+            line = f"Streaming: live to {only_item.display_name() if only_item else only_ip}"
+        else:
+            line = f"Streaming: live to {active_count} PCs"
+        try:
+            self.streaming_status_label.configure(text=line)
+        except Exception:
+            pass
+        self.stream_button.config(state=tk.NORMAL if (can and not active_here) else tk.DISABLED)
+        self.stop_stream_button.config(state=tk.NORMAL if (can and active_here) else tk.DISABLED)
+
     def get_hostname(self) -> str:
         try:
             return socket.gethostname()
@@ -875,6 +926,29 @@ class ControllerApp:
         return base64.b64encode(buf.getvalue()).decode("ascii")
 
     def start_projection(self, pc_ip: str, api_key: str, hostname: str) -> None:
+        with self.projection_lock:
+            if self.projection_active.get(pc_ip, False):
+                return
+        try:
+            req = self.client.post_project_request(
+                pc_ip,
+                api_key,
+                {"sender_hostname": self.get_hostname(), "timestamp": datetime.now().isoformat()},
+            )
+            if req.status_code == 401:
+                raise PermissionError("invalid api key")
+            if req.status_code != 200:
+                detail = ""
+                try:
+                    js = req.json()
+                    detail = str(js.get("error") or js)
+                except Exception:
+                    detail = (req.text or "")[:200]
+                raise RuntimeError(f"Guest denied projection: {detail}")
+        except Exception as e:
+            self.root.after(0, lambda: self._set_status(f"✗ Projection request rejected ({hostname}): {e}"))
+            self.root.after(0, self._sync_projection_controls)
+            return
         with self.projection_lock:
             if self.projection_active.get(pc_ip, False):
                 return
@@ -1004,6 +1078,144 @@ class ControllerApp:
         name = item.display_name() if item else ip
         self.stop_projection(pc_ip=ip, notify_agent=True)
         self._set_status(f"✓ Projection stopped — {name}")
+
+    def _build_stream_session(self, pc_ip: str) -> StreamSession:
+        capturer = ScreenCapturer(fps=30)
+        capturer.start()
+        warm_deadline = time.time() + 2.0
+        frame = None
+        while time.time() < warm_deadline:
+            frame = capturer.get_latest_frame_copy()
+            if frame is not None:
+                break
+            time.sleep(0.03)
+        if frame is None:
+            capturer.stop()
+            raise RuntimeError("Could not capture desktop frame")
+        h, w = frame.shape[:2]
+        encoder = VideoEncoder(fps=30, bitrate="8M", crf=23, preset="ultrafast")
+        rtsp_server = RTSPServer(port=8554, path="stream")
+        rtsp_server.start(width=w, height=h, encoder=encoder)
+        stop_event = threading.Event()
+        thr = threading.Thread(
+            target=streaming_thread,
+            args=(capturer, rtsp_server, stop_event, 30),
+            daemon=True,
+            name=f"rtsp-stream-{pc_ip}",
+        )
+        thr.start()
+        host_ip = get_local_ip_for_target(pc_ip)
+        stream_url = f"rtsp://{host_ip}:8554/stream"
+        return StreamSession(
+            capturer=capturer,
+            encoder=encoder,
+            rtsp_server=rtsp_server,
+            stop_event=stop_event,
+            stream_thread=thr,
+            width=w,
+            height=h,
+            stream_url=stream_url,
+        )
+
+    def start_stream_to_guest(self, pc_ip: str, pc_api_key: str, pc_hostname: str) -> None:
+        with self.stream_lock:
+            if pc_ip in self.stream_sessions:
+                return
+        try:
+            req = self.client.post_project_request(
+                pc_ip,
+                pc_api_key,
+                {"sender_hostname": self.get_hostname(), "timestamp": datetime.now().isoformat()},
+            )
+            if req.status_code == 401:
+                raise PermissionError("Invalid API key")
+            if req.status_code != 200:
+                detail = ""
+                try:
+                    js = req.json()
+                    detail = str(js.get("error") or js)
+                except Exception:
+                    detail = (req.text or "")[:200]
+                raise RuntimeError(f"Guest denied stream: {detail}")
+
+            session = self._build_stream_session(pc_ip)
+            body = {
+                "stream_url": session.stream_url,
+                "sender_hostname": self.get_hostname(),
+                "fps": 30,
+                "codec": "h264",
+                "width": session.width,
+                "height": session.height,
+            }
+            resp = self.client.post_stream(pc_ip, pc_api_key, body)
+            if resp.status_code == 401:
+                raise PermissionError("Invalid API key")
+            if resp.status_code != 200:
+                raise RuntimeError(f"Guest rejected stream ({resp.status_code})")
+            with self.stream_lock:
+                self.stream_sessions[pc_ip] = session
+            self.root.after(0, lambda: self._set_status(f"🎬 Streaming to {pc_hostname} @ 30 FPS"))
+            self.root.after(0, self._sync_stream_controls)
+        except Exception as e:
+            self.stop_stream_to_guest(pc_ip, notify_guest=False)
+            self.root.after(0, lambda: self._set_status(f"✗ Streaming error: {e}"))
+
+    def stop_stream_to_guest(self, pc_ip: str, notify_guest: bool = True) -> None:
+        with self.stream_lock:
+            session = self.stream_sessions.pop(pc_ip, None)
+        if session:
+            session.stop_event.set()
+            session.capturer.stop()
+            session.rtsp_server.stop()
+        item = self.items.get(pc_ip)
+        if notify_guest and item and item.api_key:
+            try:
+                self.client.post_stop_stream(pc_ip, item.api_key)
+            except Exception:
+                pass
+        self.root.after(0, self._sync_stream_controls)
+
+    def start_streaming(self) -> None:
+        ip = self._selected_ip
+        if not ip:
+            messagebox.showwarning("No PC Selected", "Please select a PC first.")
+            return
+        item = self.items.get(ip)
+        if not item:
+            return
+        if not item.api_key:
+            messagebox.showerror("Missing API key", "This PC has no API key configured.")
+            return
+        with self.stream_lock:
+            if ip in self.stream_sessions:
+                messagebox.showinfo("Already streaming", f"Already streaming to {item.display_name()}.")
+                return
+        if not messagebox.askyesno(
+            "Start stream",
+            f"Stream your desktop to {item.display_name()} ({item.ip})?\n\nReal-time video @ 30 FPS via RTSP.",
+        ):
+            return
+        threading.Thread(
+            target=self.start_stream_to_guest,
+            args=(item.ip, item.api_key, item.display_name()),
+            daemon=True,
+            name=f"start-stream-{item.ip}",
+        ).start()
+
+    def stop_streaming(self) -> None:
+        ip = self._selected_ip
+        if not ip:
+            messagebox.showwarning("No PC Selected", "Please select a PC first.")
+            return
+        with self.stream_lock:
+            active = ip in self.stream_sessions
+        if not active:
+            messagebox.showinfo("Not streaming", "Stream is not active for the selected PC.")
+            return
+        item = self.items.get(ip)
+        name = item.display_name() if item else ip
+        self.stop_stream_to_guest(ip, notify_guest=True)
+        self._set_status(f"✓ Stream stopped — {name}")
 
     def _reset_screenshot_view(self) -> None:
         self._screenshot_history = []
@@ -1429,6 +1641,10 @@ class ControllerApp:
                         self.client.post_stop_projection(ip, it.api_key)
                     except Exception:
                         pass
+        with self.stream_lock:
+            stream_ips = list(self.stream_sessions.keys())
+        for ip in stream_ips:
+            self.stop_stream_to_guest(ip, notify_guest=True)
         self.save_config()
         self.stop_event.set()
         self.root.after(150, self.root.destroy)

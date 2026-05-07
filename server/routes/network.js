@@ -141,52 +141,60 @@ router.post('/server-scan', scanLimiter, async (req, res) => {
 
     const scanPromise = (async () => {
       let totalDevicesFound = 0;
+      const subnetErrors = [];
 
-      for (let i = 0; i < subnets.length; i++) {
-        const subnet = subnets[i];
+      try {
+        for (let i = 0; i < subnets.length; i++) {
+          const subnet = subnets[i];
+          try {
+            await networkScanner.scanNetwork(
+              subnet,
+              (progress, devicesFound) => {
+                totalDevicesFound = Math.max(totalDevicesFound, devicesFound);
+                const overallProgress = Math.round(((i + (progress / 100)) / subnets.length) * 100);
+                if (io) {
+                  io.to(`user_${userId}`).emit('scan_progress', {
+                    progress: overallProgress,
+                    devicesFound: totalDevicesFound,
+                    subnet: `${subnet}.0/24`,
+                    userId
+                  });
+                }
+              },
+              (device) => {
+                const connectedComputers = req.app.get('connectedComputers');
 
-        await networkScanner.scanNetwork(
-          subnet,
-          (progress, devicesFound) => {
-            totalDevicesFound = Math.max(totalDevicesFound, devicesFound);
-            const overallProgress = Math.round(((i + (progress / 100)) / subnets.length) * 100);
-            if (io) {
-              io.to(`user_${userId}`).emit('scan_progress', {
-                progress: overallProgress,
-                devicesFound: totalDevicesFound,
-                subnet: `${subnet}.0/24`,
-                userId
-              });
-            }
-          },
-          (device) => {
-            const connectedComputers = req.app.get('connectedComputers');
+                if (connectedComputers) {
+                  for (const computerData of connectedComputers.values()) {
+                    if (computerData.computer.ip === device.ip) {
+                      return;
+                    }
+                  }
+                }
 
-            if (connectedComputers) {
-              for (const computerData of connectedComputers.values()) {
-                if (computerData.computer.ip === device.ip) {
-                  return;
+                if (io) {
+                  io.to(`user_${userId}`).emit('device_found', {
+                    device,
+                    subnet: `${subnet}.0/24`,
+                    userId
+                  });
                 }
               }
-            }
-
-            if (io) {
-              io.to(`user_${userId}`).emit('device_found', {
-                device,
-                subnet: `${subnet}.0/24`,
-                userId
-              });
-            }
+            );
+          } catch (subErr) {
+            console.error(`Server scan failed on subnet ${subnet}.0/24:`, subErr);
+            subnetErrors.push(`${subnet}.0/24`);
           }
-        );
-      }
-
-      if (io) {
-        io.to(`user_${userId}`).emit('scan_complete', {
-          count: networkScanner.getDiscoveredDevices().length,
-          subnets: subnets.map((s) => `${s}.0/24`),
-          userId
-        });
+        }
+      } finally {
+        if (io) {
+          io.to(`user_${userId}`).emit('scan_complete', {
+            count: networkScanner.getDiscoveredDevices().length,
+            subnets: subnets.map((s) => `${s}.0/24`),
+            subnetErrors,
+            userId
+          });
+        }
       }
     })();
 

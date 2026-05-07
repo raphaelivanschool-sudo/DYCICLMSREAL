@@ -12,6 +12,7 @@ import subprocess
 import threading
 import time
 import traceback
+import ctypes
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Dict, Optional, Tuple, TypeVar
@@ -30,6 +31,8 @@ _projection_queue: "queue.Queue[Optional[bytes]]" = queue.Queue()
 _projection_ui_thread: Optional[threading.Thread] = None
 _projection_lock = threading.Lock()
 _projection_photo_ref: list = []  # keep PhotoImage refs for Tk
+_stream_player_proc: Optional[subprocess.Popen] = None
+_stream_player_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -296,6 +299,98 @@ def _ensure_projection_ui(logger: logging.Logger) -> None:
         _projection_ui_thread.start()
 
 
+def _start_stream_player(stream_url: str, logger: logging.Logger) -> None:
+    global _stream_player_proc
+    with _stream_player_lock:
+        if _stream_player_proc is not None and _stream_player_proc.poll() is None:
+            try:
+                _stream_player_proc.terminate()
+                _stream_player_proc.wait(timeout=1.5)
+            except Exception:
+                try:
+                    _stream_player_proc.kill()
+                except Exception:
+                    pass
+            _stream_player_proc = None
+
+        cmd = [
+            "ffplay",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-fflags",
+            "nobuffer",
+            "-flags",
+            "low_delay",
+            "-framedrop",
+            "-sync",
+            "video",
+            "-rtsp_transport",
+            "tcp",
+            "-window_title",
+            "Live Stream",
+            "-fs",
+            stream_url,
+        ]
+        _stream_player_proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        logger.info("stream player started url=%s", stream_url)
+
+
+def _stop_stream_player(logger: logging.Logger) -> None:
+    global _stream_player_proc
+    with _stream_player_lock:
+        if _stream_player_proc is None:
+            return
+        try:
+            _stream_player_proc.terminate()
+            _stream_player_proc.wait(timeout=1.5)
+        except Exception:
+            try:
+                _stream_player_proc.kill()
+            except Exception:
+                pass
+        _stream_player_proc = None
+        logger.info("stream player stopped")
+
+
+def _ask_projection_consent(sender_hostname: str, timeout_seconds: int = 25) -> bool:
+    """
+    Ask local guest user for consent before host projection starts.
+    Uses Windows MessageBox for reliable topmost prompt.
+    """
+    if not platform.system().lower().startswith("win"):
+        return True
+
+    prompt = (
+        f"{sender_hostname or 'Host PC'} wants to share their screen on this computer.\n\n"
+        f"Allow screen sharing now?\n"
+        f"(This prompt closes in {timeout_seconds}s and defaults to No.)"
+    )
+    title = "DYCI Screen Share Request"
+
+    result: Dict[str, bool] = {"accepted": False}
+
+    def _show() -> None:
+        try:
+            MB_YESNO = 0x00000004
+            MB_ICONQUESTION = 0x00000020
+            MB_TOPMOST = 0x00040000
+            MB_SYSTEMMODAL = 0x00001000
+            value = ctypes.windll.user32.MessageBoxW(0, prompt, title, MB_YESNO | MB_ICONQUESTION | MB_TOPMOST | MB_SYSTEMMODAL)
+            result["accepted"] = value == 6  # IDYES
+        except Exception:
+            result["accepted"] = False
+
+    t = threading.Thread(target=_show, daemon=True)
+    t.start()
+    t.join(timeout=max(5, int(timeout_seconds)))
+    return bool(result["accepted"])
+
+
 def create_app(config: AgentConfig, logger: logging.Logger) -> Flask:
     app = Flask(__name__)
     auth_required = require_auth(config)
@@ -436,6 +531,23 @@ def create_app(config: AgentConfig, logger: logging.Logger) -> Flask:
             logger.error("project failed: %s\n%s", e, traceback.format_exc())
             return jsonify({"error": "projection failed"}), 500
 
+    @app.post("/project_request")
+    @auth_required
+    def project_request_ep() -> Tuple[Response, int]:
+        """
+        Ask guest user permission before host starts continuous projection.
+        """
+        try:
+            body: Dict[str, Any] = request.get_json(force=True, silent=True) or {}
+            sender = str(body.get("sender_hostname") or "Host PC")
+            accepted = _ask_projection_consent(sender_hostname=sender, timeout_seconds=25)
+            if not accepted:
+                return jsonify({"accepted": False, "error": "Guest denied screen-share request"}), 403
+            return jsonify({"accepted": True}), 200
+        except Exception as e:
+            logger.error("project_request failed: %s\n%s", e, traceback.format_exc())
+            return jsonify({"error": "projection request failed"}), 500
+
     @app.post("/stop_projection")
     @auth_required
     def stop_projection_ep() -> Tuple[Response, int]:
@@ -446,6 +558,34 @@ def create_app(config: AgentConfig, logger: logging.Logger) -> Flask:
         except Exception as e:
             logger.error("stop_projection failed: %s\n%s", e, traceback.format_exc())
             return jsonify({"error": "stop failed"}), 500
+
+    @app.post("/stream")
+    @auth_required
+    def start_stream_ep() -> Tuple[Response, int]:
+        try:
+            body: Dict[str, Any] = request.get_json(force=True, silent=True) or {}
+            stream_url = str(body.get("stream_url") or "").strip()
+            if not stream_url:
+                return jsonify({"error": "stream_url required"}), 400
+            if not (stream_url.startswith("rtsp://") or stream_url.startswith("rtsps://")):
+                return jsonify({"error": "stream_url must be RTSP"}), 400
+            _start_stream_player(stream_url=stream_url, logger=logger)
+            return jsonify({"status": "streaming", "stream_url": stream_url}), 200
+        except FileNotFoundError:
+            return jsonify({"error": "ffplay not installed"}), 500
+        except Exception as e:
+            logger.error("stream start failed: %s\n%s", e, traceback.format_exc())
+            return jsonify({"error": "stream start failed"}), 500
+
+    @app.post("/stop_stream")
+    @auth_required
+    def stop_stream_ep() -> Tuple[Response, int]:
+        try:
+            _stop_stream_player(logger=logger)
+            return jsonify({"status": "stopped"}), 200
+        except Exception as e:
+            logger.error("stream stop failed: %s\n%s", e, traceback.format_exc())
+            return jsonify({"error": "stream stop failed"}), 500
 
     return app
 

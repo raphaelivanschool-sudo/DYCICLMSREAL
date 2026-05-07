@@ -159,12 +159,36 @@ export const agentsApi = {
     return api.post("/api/agents/projection/frame", body);
   },
 
+  requestProjectionPermission: (computerId, payload = {}, meta = {}) => {
+    const body = { ...payload };
+    if (computerId) body.computerId = computerId;
+    if (meta.ip) body.ip = meta.ip;
+    if (meta.mac) body.mac = meta.mac;
+    return api.post("/api/agents/projection/request", body);
+  },
+
   stopProjectionHttp: (computerId, meta = {}) => {
     const body = {};
     if (computerId) body.computerId = computerId;
     if (meta.ip) body.ip = meta.ip;
     if (meta.mac) body.mac = meta.mac;
     return api.post("/api/agents/projection/stop", body);
+  },
+
+  startRtspStream: (computerId, payload = {}, meta = {}) => {
+    const body = { ...payload };
+    if (computerId) body.computerId = computerId;
+    if (meta.ip) body.ip = meta.ip;
+    if (meta.mac) body.mac = meta.mac;
+    return api.post("/api/agents/stream/start", body);
+  },
+
+  stopRtspStream: (computerId, meta = {}) => {
+    const body = {};
+    if (computerId) body.computerId = computerId;
+    if (meta.ip) body.ip = meta.ip;
+    if (meta.mac) body.mac = meta.mac;
+    return api.post("/api/agents/stream/stop", body);
   },
 };
 

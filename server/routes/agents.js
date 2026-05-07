@@ -426,6 +426,87 @@ router.post('/projection/frame', authenticateToken, async (req, res) => {
   }
 });
 
+/** Ask guest Flask agent to show a local consent popup before projection starts. */
+router.post('/projection/request', authenticateToken, async (req, res) => {
+  try {
+    const apiKey = getPcAgentApiKey();
+    if (!apiKey) {
+      return res.status(503).json({
+        success: false,
+        error:
+          `Python agent API key not configured. Set PC_AGENT_API_KEY in server/.env, ` +
+            `or PC_AGENT_CONFIG_PATH to agent_config.json, or place agent_config.json at ${getPcAgentConfigPathTried()} ` +
+            `(api_key must match the guest PC Python agent).`,
+      });
+    }
+
+    const connectedComputers = req.app.get('connectedComputers');
+    const { computerId, ip, mac, sender_hostname } = req.body || {};
+
+    const { targetId, strategy } = pickAgentTargetId(connectedComputers, { computerId, ip, mac });
+    if (!targetId) {
+      return res.status(404).json({
+        success: false,
+        error: 'No online agent matches this PC. Select a row that maps to a connected agent.',
+      });
+    }
+    const lanIp = resolveLanIpForPcAgent(connectedComputers, targetId, ip);
+    if (!lanIp) {
+      return res.status(400).json({
+        success: false,
+        error: 'Could not resolve LAN IP for the guest agent.',
+      });
+    }
+
+    const url = `http://${lanIp}:${PC_AGENT_PORT}/project_request`;
+    let guestResp;
+    try {
+      guestResp = await axios.post(
+        url,
+        {
+          sender_hostname: sender_hostname || 'dyci-host',
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: 30000,
+          validateStatus: () => true,
+        },
+      );
+    } catch (e) {
+      const msg =
+        e.code === 'ECONNREFUSED'
+          ? `Nothing listening on ${lanIp}:${PC_AGENT_PORT} — run the Python PC agent on the guest.`
+          : e.message || 'Projection request failed';
+      return res.status(502).json({ success: false, error: msg });
+    }
+
+    if (guestResp.status !== 200) {
+      const detail =
+        typeof guestResp.data === 'object' && guestResp.data?.error
+          ? guestResp.data.error
+          : guestResp.statusText || String(guestResp.status);
+      return res.status(guestResp.status === 403 ? 403 : 502).json({
+        success: false,
+        error: `Guest agent: ${detail}`,
+      });
+    }
+
+    return res.json({
+      success: true,
+      accepted: true,
+      resolvedComputerId: targetId,
+      resolutionStrategy: strategy,
+      forwardedTo: url,
+    });
+  } catch (error) {
+    console.error('[agents/projection/request]', error);
+    res.status(500).json({ success: false, error: 'Projection request failed' });
+  }
+});
+
 /** Ask guest Flask agent to close fullscreen projection. */
 router.post('/projection/stop', authenticateToken, async (req, res) => {
   try {
@@ -508,6 +589,193 @@ router.post('/projection/stop', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('[agents/projection/stop]', error);
     res.status(500).json({ success: false, error: 'Stop projection failed' });
+  }
+});
+
+/** Ask guest Flask agent to open RTSP stream in fullscreen (ffplay). */
+router.post('/stream/start', authenticateToken, async (req, res) => {
+  try {
+    const apiKey = getPcAgentApiKey();
+    if (!apiKey) {
+      return res.status(503).json({
+        success: false,
+        error:
+          `Python agent API key not configured. Set PC_AGENT_API_KEY or sync agent_config.json (see ${getPcAgentConfigPathTried()}).`,
+      });
+    }
+
+    const connectedComputers = req.app.get('connectedComputers');
+    const { computerId, ip, mac, stream_url, sender_hostname, fps, codec } = req.body || {};
+
+    if (!stream_url || typeof stream_url !== 'string') {
+      return res.status(400).json({ success: false, error: 'stream_url is required' });
+    }
+
+    const { targetId, strategy } = pickAgentTargetId(connectedComputers, {
+      computerId,
+      ip,
+      mac,
+    });
+    if (!targetId) {
+      return res.status(404).json({
+        success: false,
+        error: 'No online agent matches this PC.',
+      });
+    }
+
+    const lanIp = resolveLanIpForPcAgent(connectedComputers, targetId, ip);
+    if (!lanIp) {
+      return res.status(400).json({
+        success: false,
+        error: 'Could not resolve LAN IP for the guest agent.',
+      });
+    }
+
+    const url = `http://${lanIp}:${PC_AGENT_PORT}/stream`;
+    const reqUrl = `http://${lanIp}:${PC_AGENT_PORT}/project_request`;
+    try {
+      const consentResp = await axios.post(
+        reqUrl,
+        {
+          sender_hostname: sender_hostname || 'dyci-host',
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: 30000,
+          validateStatus: () => true,
+        },
+      );
+      if (consentResp.status !== 200) {
+        const detail =
+          typeof consentResp.data === 'object' && consentResp.data?.error
+            ? consentResp.data.error
+            : consentResp.statusText || String(consentResp.status);
+        return res.status(consentResp.status === 403 ? 403 : 502).json({
+          success: false,
+          error: `Guest denied stream request: ${detail}`,
+        });
+      }
+    } catch (e) {
+      const msg =
+        e.code === 'ECONNREFUSED'
+          ? `Nothing listening on ${lanIp}:${PC_AGENT_PORT} — run the Python PC agent on the guest.`
+          : e.message || 'Projection request failed';
+      return res.status(502).json({ success: false, error: msg });
+    }
+
+    let guestResp;
+    try {
+      guestResp = await axios.post(
+        url,
+        {
+          stream_url,
+          sender_hostname: sender_hostname || 'dyci-host',
+          fps: typeof fps === 'number' ? fps : 30,
+          codec: codec || 'h264',
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: 10000,
+          validateStatus: () => true,
+        },
+      );
+    } catch (e) {
+      const msg =
+        e.code === 'ECONNREFUSED'
+          ? `Nothing listening on ${lanIp}:${PC_AGENT_PORT} — run the Python PC agent on the guest.`
+          : e.message || 'Forward failed';
+      return res.status(502).json({ success: false, error: msg });
+    }
+
+    if (guestResp.status !== 200) {
+      const detail =
+        typeof guestResp.data === 'object' && guestResp.data?.error
+          ? guestResp.data.error
+          : guestResp.statusText || String(guestResp.status);
+      return res.status(502).json({
+        success: false,
+        error: `Guest agent HTTP ${guestResp.status}: ${detail}`,
+      });
+    }
+
+    return res.json({
+      success: true,
+      resolvedComputerId: targetId,
+      resolutionStrategy: strategy,
+      forwardedTo: url,
+    });
+  } catch (error) {
+    console.error('[agents/stream/start]', error);
+    res.status(500).json({ success: false, error: 'Start stream failed' });
+  }
+});
+
+/** Ask guest Flask agent to stop RTSP playback. */
+router.post('/stream/stop', authenticateToken, async (req, res) => {
+  try {
+    const apiKey = getPcAgentApiKey();
+    if (!apiKey) {
+      return res.status(503).json({
+        success: false,
+        error:
+          `Python agent API key not configured. Set PC_AGENT_API_KEY or sync agent_config.json (see ${getPcAgentConfigPathTried()}).`,
+      });
+    }
+
+    const connectedComputers = req.app.get('connectedComputers');
+    const { computerId, ip, mac } = req.body || {};
+    const { targetId, strategy } = pickAgentTargetId(connectedComputers, { computerId, ip, mac });
+    if (!targetId) {
+      return res.status(404).json({ success: false, error: 'No online agent matches this PC.' });
+    }
+    const lanIp = resolveLanIpForPcAgent(connectedComputers, targetId, ip);
+    if (!lanIp) {
+      return res.status(400).json({ success: false, error: 'Could not resolve LAN IP for the guest agent.' });
+    }
+
+    const url = `http://${lanIp}:${PC_AGENT_PORT}/stop_stream`;
+    try {
+      const guestResp = await axios.post(
+        url,
+        {},
+        {
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: 10000,
+          validateStatus: () => true,
+        },
+      );
+      if (guestResp.status !== 200) {
+        const detail =
+          typeof guestResp.data === 'object' && guestResp.data?.error
+            ? guestResp.data.error
+            : guestResp.statusText || String(guestResp.status);
+        return res.status(502).json({
+          success: false,
+          error: `Guest agent HTTP ${guestResp.status}: ${detail}`,
+        });
+      }
+      return res.json({
+        success: true,
+        resolvedComputerId: targetId,
+        resolutionStrategy: strategy,
+        forwardedTo: url,
+      });
+    } catch (e) {
+      const msg = e.code === 'ECONNREFUSED' ? `Nothing listening on ${lanIp}:${PC_AGENT_PORT}` : e.message || 'Forward failed';
+      return res.status(502).json({ success: false, error: msg });
+    }
+  } catch (error) {
+    console.error('[agents/stream/stop]', error);
+    res.status(500).json({ success: false, error: 'Stop stream failed' });
   }
 });
 
