@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Monitor, RefreshCw, Search, AlertCircle, Radio } from 'lucide-react';
+import { Monitor, RefreshCw, Search, AlertCircle, Radio, Power } from 'lucide-react';
 import networkApi from '../../services/network-api.js';
 import { agentsApi } from '../../services/api.js';
 import socketService from '../../services/socketService.js';
@@ -67,6 +67,9 @@ function DeveloperModePage() {
   const [lockingIp, setLockingIp] = useState('');
   const [lockStatus, setLockStatus] = useState('');
   const [lockError, setLockError] = useState('');
+  const [shuttingDownIp, setShuttingDownIp] = useState('');
+  const [shutdownStatus, setShutdownStatus] = useState('');
+  const [shutdownError, setShutdownError] = useState('');
   const [screenshotUrl, setScreenshotUrl] = useState('');
   const [screenshotStatus, setScreenshotStatus] = useState('');
   const [screenshotFetching, setScreenshotFetching] = useState(false);
@@ -146,6 +149,38 @@ function DeveloperModePage() {
       setLockStatus('');
     } finally {
       setLockingIp('');
+    }
+  };
+
+  const shutdownDevice = async (device) => {
+    if (!device?.ip) return;
+
+    const hostname = device.user || device.hostname || 'Unknown';
+    const ip = device.ip;
+
+    const confirmed = window.confirm(
+      `Shut down ${hostname} (${ip})?\n\nThis will power off the PC immediately. Unsaved work may be lost.`
+    );
+    if (!confirmed) return;
+
+    setShuttingDownIp(ip);
+    setShutdownStatus('Sending shutdown...');
+    setShutdownError('');
+
+    try {
+      const res = await agentsApi.sendCommand(device.agentId, 'shutdown', { delay: 0 }, { ip: device.ip, mac: device.mac });
+      const rid = res?.data?.resolvedComputerId;
+      if (rid) {
+        commandTargetComputerIdRef.current = rid;
+      }
+      setShutdownStatus(`✓ Shutdown command sent to ${hostname} (${ip})`);
+      setShutdownError('');
+    } catch (error) {
+      const msg = error.response?.data?.error || error.message || 'Unknown error';
+      setShutdownError(`✗ Shutdown failed: ${msg}`);
+      setShutdownStatus('');
+    } finally {
+      setShuttingDownIp('');
     }
   };
 
@@ -627,10 +662,23 @@ function DeveloperModePage() {
             </button>
             <button
               onClick={() => selectedDevice && lockDevice(selectedDevice)}
-              disabled={!selectedDevice || Boolean(lockingIp)}
+              disabled={!selectedDevice || Boolean(lockingIp) || Boolean(shuttingDownIp)}
               className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm text-white bg-amber-600 hover:bg-amber-700 disabled:opacity-50"
             >
               {selectedDevice ? (lockingIp === selectedDevice.ip ? 'Locking...' : `🔒 Lock ${selectedDevice.ip}`) : '🔒 Lock Selected PC'}
+            </button>
+            <button
+              type="button"
+              onClick={() => selectedDevice && shutdownDevice(selectedDevice)}
+              disabled={!selectedDevice || Boolean(lockingIp) || Boolean(shuttingDownIp)}
+              className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm text-white bg-red-600 hover:bg-red-700 disabled:opacity-50"
+            >
+              <Power className="w-4 h-4" />
+              {selectedDevice
+                ? shuttingDownIp === selectedDevice.ip
+                  ? 'Shutting down...'
+                  : `Shutdown ${selectedDevice.ip}`
+                : 'Shutdown selected PC'}
             </button>
           </div>
 
@@ -647,6 +695,12 @@ function DeveloperModePage() {
           )}
           {lockError && (
             <p className="text-sm text-red-700 font-medium">{lockError}</p>
+          )}
+          {shutdownStatus && (
+            <p className="text-sm text-emerald-700 font-medium">{shutdownStatus}</p>
+          )}
+          {shutdownError && (
+            <p className="text-sm text-red-700 font-medium">{shutdownError}</p>
           )}
 
           {(discoveryError || scannerWarnings.length > 0) && (
@@ -707,17 +761,33 @@ function DeveloperModePage() {
                       {device.source || 'unknown'}
                     </td>
                     <td className="px-4 py-3 text-gray-700">
-                      <button
-                        onClick={(evt) => {
-                          evt.stopPropagation();
-                          setSelectedIp(device.ip || '');
-                          lockDevice(device);
-                        }}
-                        disabled={Boolean(lockingIp)}
-                        className="px-3 py-1.5 rounded-md text-xs font-medium text-white bg-amber-600 hover:bg-amber-700 disabled:opacity-50"
-                      >
-                        {lockingIp === device.ip ? 'Locking...' : '🔒 Lock'}
-                      </button>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={(evt) => {
+                            evt.stopPropagation();
+                            setSelectedIp(device.ip || '');
+                            lockDevice(device);
+                          }}
+                          disabled={Boolean(lockingIp) || Boolean(shuttingDownIp)}
+                          className="px-3 py-1.5 rounded-md text-xs font-medium text-white bg-amber-600 hover:bg-amber-700 disabled:opacity-50"
+                        >
+                          {lockingIp === device.ip ? 'Locking...' : '🔒 Lock'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(evt) => {
+                            evt.stopPropagation();
+                            setSelectedIp(device.ip || '');
+                            shutdownDevice(device);
+                          }}
+                          disabled={Boolean(lockingIp) || Boolean(shuttingDownIp)}
+                          className="inline-flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-medium text-white bg-red-600 hover:bg-red-700 disabled:opacity-50"
+                        >
+                          <Power className="w-3.5 h-3.5" />
+                          {shuttingDownIp === device.ip ? 'Shutting down...' : 'Shutdown'}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))
