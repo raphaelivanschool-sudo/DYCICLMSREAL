@@ -508,6 +508,7 @@ import gradingRoutes from "./routes/grading.js";
 import networkRoutes from "./routes/network.js";
 import logsRoutes from "./routes/logs.js";
 import agentsRoutes from "./routes/agents.js";
+import sessionContextRoutes from "./routes/session-context.js";
 import { authenticateToken } from "./middleware/auth.js";
 app.use("/api/auth", authRoutes);
 app.use("/api/labs", authenticateToken, labsRoutes);
@@ -522,6 +523,7 @@ app.use("/api/grading", authenticateToken, gradingRoutes);
 app.use("/api/network", authenticateToken, networkRoutes);
 app.use("/api/logs", authenticateToken, logsRoutes);
 app.use("/api/agents", authenticateToken, agentsRoutes);
+app.use("/api/session-context", authenticateToken, sessionContextRoutes);
 
 // Health check endpoint
 app.get("/api/health", (req, res) => {

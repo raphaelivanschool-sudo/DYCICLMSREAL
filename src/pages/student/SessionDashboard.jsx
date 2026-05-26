@@ -13,7 +13,7 @@ import {
   ChevronRight,
   MessageCircle
 } from 'lucide-react';
-import { mockStudentSession, mockAnnouncements } from '../../data/mockStudentData';
+import sessionContextService from '../../services/sessionContextService';
 
 function SessionDashboard() {
   // Get actual user data from localStorage
@@ -21,6 +21,9 @@ function SessionDashboard() {
     const stored = localStorage.getItem('user');
     return stored ? JSON.parse(stored) : null;
   });
+
+  const [ctx, setCtx] = useState(null);
+  const [ctxError, setCtxError] = useState('');
   
   const [sessionStartTime] = useState(() => {
     // Store session start time when component mounts
@@ -60,6 +63,25 @@ function SessionDashboard() {
     return () => clearInterval(timer);
   }, [sessionStartTime]);
 
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        setCtxError('');
+        const data = await sessionContextService.getStudentContext();
+        if (!cancelled) setCtx(data);
+      } catch (e) {
+        if (!cancelled) setCtxError(e?.message || 'Failed to load session info');
+      }
+    };
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const announcements = [];
+
   return (
     <div className="max-w-7xl mx-auto">
       {/* Page Header */}
@@ -93,7 +115,7 @@ function SessionDashboard() {
             <span className="text-sm font-medium text-gray-500">Laboratory</span>
             <Monitor className="w-5 h-5 text-blue-500" />
           </div>
-          <p className="font-semibold text-gray-900">{mockStudentSession.labName}</p>
+          <p className="font-semibold text-gray-900">{ctx?.laboratory?.name || 'No active session'}</p>
           <p className="text-xs text-gray-400">Current location</p>
         </div>
 
@@ -103,8 +125,10 @@ function SessionDashboard() {
             <span className="text-sm font-medium text-gray-500">Assigned Seat</span>
             <MapPin className="w-5 h-5 text-green-500" />
           </div>
-          <p className="font-semibold text-gray-900">Seat {mockStudentSession.seatNumber}</p>
-          <p className="text-xs text-gray-400">{mockStudentSession.pcName}</p>
+          <p className="font-semibold text-gray-900">
+            {ctx?.assignment?.computer?.seatNumber != null ? `Seat ${ctx.assignment.computer.seatNumber}` : 'Seat —'}
+          </p>
+          <p className="text-xs text-gray-400">{ctx?.assignment?.computer?.name || '—'}</p>
         </div>
 
         {/* Session Duration Card */}
@@ -123,10 +147,16 @@ function SessionDashboard() {
             <span className="text-sm font-medium text-gray-500">Instructor</span>
             <UserCircle className="w-5 h-5 text-orange-500" />
           </div>
-          <p className="font-semibold text-gray-900">{mockStudentSession.instructor}</p>
+          <p className="font-semibold text-gray-900">{ctx?.instructor?.fullName || '—'}</p>
           <p className="text-xs text-gray-400">Course facilitator</p>
         </div>
       </div>
+
+      {!!ctxError && (
+        <div className="mb-6 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl p-4 text-sm">
+          {ctxError}
+        </div>
+      )}
 
       {/* Quick Actions */}
       <div className="mb-6">
@@ -190,7 +220,9 @@ function SessionDashboard() {
             <span className="text-xs text-gray-400">4 items</span>
           </div>
           <div className="p-5">
-            {mockAnnouncements.map((announcement) => (
+            {announcements.length === 0 ? (
+              <div className="text-sm text-gray-500">No announcements.</div>
+            ) : announcements.map((announcement) => (
               <div key={announcement.id} className="flex items-start mb-4 last:mb-0">
                 <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center mr-4 flex-shrink-0">
                   <FileText className="w-5 h-5 text-blue-600" />
@@ -220,15 +252,15 @@ function SessionDashboard() {
             </div>
             <div className="flex items-center justify-between">
               <span className="text-sm text-gray-500">Subject</span>
-              <span className="text-sm font-medium text-gray-900">{mockStudentSession.subject}</span>
+              <span className="text-sm font-medium text-gray-900">—</span>
             </div>
             <div className="flex items-center justify-between">
               <span className="text-sm text-gray-500">Section</span>
-              <span className="text-sm font-medium text-gray-900">{mockStudentSession.section}</span>
+              <span className="text-sm font-medium text-gray-900">—</span>
             </div>
             <div className="flex items-center justify-between">
               <span className="text-sm text-gray-500">Duration</span>
-              <span className="text-sm font-medium text-gray-900">{mockStudentSession.sessionDuration}</span>
+              <span className="text-sm font-medium text-gray-900">{elapsedTime}</span>
             </div>
             <div className="border-t border-gray-200 pt-4 mt-4">
               <div className="flex items-center">

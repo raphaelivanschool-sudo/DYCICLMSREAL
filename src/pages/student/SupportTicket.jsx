@@ -13,11 +13,12 @@ import {
   HardDrive,
   MoreHorizontal
 } from 'lucide-react';
-import { mockStudentSession } from '../../data/mockStudentData';
 import ticketService from '../../services/ticketService';
+import sessionContextService from '../../services/sessionContextService';
 
 function SupportTicket() {
   const [tickets, setTickets] = useState([]);
+  const [sessionCtx, setSessionCtx] = useState(null);
   const [stats, setStats] = useState({
     total: 0,
     pendingApproval: 0,
@@ -46,12 +47,14 @@ function SupportTicket() {
   const loadData = async () => {
     try {
       setLoading(true);
-      const [ticketsData, statsData] = await Promise.all([
+      const [ticketsData, statsData, ctxData] = await Promise.all([
         ticketService.getMyTickets(),
-        ticketService.getMyTicketStats()
+        ticketService.getMyTicketStats(),
+        sessionContextService.getStudentContext().catch(() => null),
       ]);
       setTickets(ticketsData);
       setStats(statsData);
+      setSessionCtx(ctxData);
     } catch (error) {
       console.error('Error loading data:', error);
       setToast('Error loading tickets');
@@ -184,25 +187,36 @@ function SupportTicket() {
             <Monitor className="w-5 h-5 text-blue-500 mr-2" />
             <span className="text-sm font-medium text-gray-700">Laboratory</span>
             <span className="mx-2 text-gray-400">|</span>
-            <span className="text-sm text-gray-600">{mockStudentSession.labName}</span>
+            <span className="text-sm text-gray-600">{sessionCtx?.laboratory?.name || '—'}</span>
           </div>
           <div className="flex items-center">
             <MapPin className="w-5 h-5 text-green-500 mr-2" />
             <span className="text-sm font-medium text-gray-700">Seat Number</span>
             <span className="mx-2 text-gray-400">|</span>
-            <span className="text-sm text-gray-600">{mockStudentSession.seatNumber}</span>
+            <span className="text-sm text-gray-600">
+              {sessionCtx?.assignment?.computer?.seatNumber != null ? `Seat ${sessionCtx.assignment.computer.seatNumber}` : '—'}
+            </span>
           </div>
           <div className="flex items-center">
             <Monitor className="w-5 h-5 text-purple-500 mr-2" />
             <span className="text-sm font-medium text-gray-700">Computer</span>
             <span className="mx-2 text-gray-400">|</span>
-            <span className="text-sm text-gray-600">{mockStudentSession.pcName}</span>
+            <span className="text-sm text-gray-600">{sessionCtx?.assignment?.computer?.name || '—'}</span>
           </div>
           <div className="flex items-center">
             <User className="w-5 h-5 text-orange-500 mr-2" />
             <span className="text-sm font-medium text-gray-700">Student</span>
             <span className="mx-2 text-gray-400">|</span>
-            <span className="text-sm text-gray-600">{mockStudentSession.studentName}</span>
+            <span className="text-sm text-gray-600">{(() => {
+              const raw = localStorage.getItem('user');
+              if (!raw) return '—';
+              try {
+                const u = JSON.parse(raw);
+                return u?.fullName || u?.username || '—';
+              } catch {
+                return '—';
+              }
+            })()}</span>
           </div>
         </div>
       </div>

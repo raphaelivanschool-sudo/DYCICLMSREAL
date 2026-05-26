@@ -1,19 +1,59 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Users, Wifi, Clock, WifiOff, Search, Monitor, Lock, MessageSquare, Eye, X } from 'lucide-react';
-import { mockStudents, mockClassSession } from '../../data/mockInstructorData';
+import instructorSessionService from '../../services/instructorSessionService';
 
 function ClassroomDashboard() {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedStudent, setSelectedStudent] = useState(null);
+  const [ctx, setCtx] = useState(null);
+  const [error, setError] = useState('');
 
-  const filteredStudents = mockStudents.filter(student =>
-    student.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    student.seat.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        setError('');
+        const data = await instructorSessionService.getActiveSession();
+        if (!cancelled) setCtx(data);
+      } catch (e) {
+        if (!cancelled) setError(e?.message || 'Failed to load session');
+      }
+    };
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
-  const onlineCount = mockStudents.filter(s => s.status === 'online').length;
-  const idleCount = mockStudents.filter(s => s.status === 'idle').length;
-  const offlineCount = mockStudents.filter(s => s.status === 'offline').length;
+  const students = useMemo(() => {
+    const roster = ctx?.roster || [];
+    return roster.map((r) => {
+      const seat = r?.computer?.seatNumber != null ? String(r.computer.seatNumber) : '—';
+      return {
+        id: String(r.sessionStudentId ?? r.studentId),
+        studentId: r.studentId,
+        name: r?.student?.fullName || r?.student?.username || `Student ${r.studentId}`,
+        seat: seat,
+        status: r?.status || 'offline',
+        pcName: r?.computer?.name || '—',
+        agent: r?.agent || null,
+      };
+    });
+  }, [ctx]);
+
+  const filteredStudents = useMemo(() => {
+    const q = searchTerm.trim().toLowerCase();
+    if (!q) return students;
+    return students.filter((student) =>
+      student.name.toLowerCase().includes(q) ||
+      String(student.seat).toLowerCase().includes(q) ||
+      String(student.pcName).toLowerCase().includes(q)
+    );
+  }, [students, searchTerm]);
+
+  const onlineCount = students.filter(s => s.status === 'online').length;
+  const idleCount = students.filter(s => s.status === 'idle').length;
+  const offlineCount = students.filter(s => s.status === 'offline').length;
 
   const getStatusColor = (status) => {
     switch (status) {
@@ -55,22 +95,25 @@ function ClassroomDashboard() {
         <div className="flex flex-wrap items-center gap-6">
           <div className="flex items-center">
             <Monitor className="w-5 h-5 text-gray-400 mr-2" />
-            <span className="text-sm font-medium text-gray-900">{mockClassSession.labName}</span>
+            <span className="text-sm font-medium text-gray-900">{ctx?.laboratory?.name || 'No active session'}</span>
             <span className="mx-2 text-gray-300">|</span>
-            <span className="text-sm text-gray-500">{mockClassSession.roomNumber}</span>
+            <span className="text-sm text-gray-500">{ctx?.laboratory?.roomNumber || ctx?.laboratory?.location || ''}</span>
           </div>
           <div className="h-6 w-px bg-gray-300"></div>
           <div className="flex items-center">
-            <span className="text-sm font-medium text-gray-900">{mockClassSession.subject}</span>
-            <span className="mx-2 text-gray-300">|</span>
-            <span className="text-sm text-gray-500">{mockClassSession.section}</span>
+            <span className="text-sm font-medium text-gray-900">{ctx?.session?.name || '—'}</span>
           </div>
           <div className="h-6 w-px bg-gray-300"></div>
           <div className="text-sm text-gray-500">
-            {mockClassSession.date} • {mockClassSession.time}
+            {ctx?.session?.startTime ? new Date(ctx.session.startTime).toLocaleString() : '—'}
           </div>
         </div>
       </div>
+      {!!error && (
+        <div className="mb-6 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl p-4 text-sm">
+          {error}
+        </div>
+      )}
 
       {/* Stats Cards */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
@@ -79,7 +122,7 @@ function ClassroomDashboard() {
             <span className="text-sm font-medium text-gray-500">Total Students</span>
             <Users className="w-5 h-5 text-blue-500" />
           </div>
-          <div className="text-3xl font-bold text-gray-900">{mockStudents.length}</div>
+          <div className="text-3xl font-bold text-gray-900">{students.length}</div>
           <div className="text-xs text-gray-400 mt-1">Logged in today</div>
         </div>
 
@@ -127,7 +170,7 @@ function ClassroomDashboard() {
 
       {/* Student PC Grid */}
       <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">Student PC Grid - {mockClassSession.labName}</h2>
+        <h2 className="text-lg font-semibold text-gray-900 mb-4">Student PC Grid - {ctx?.laboratory?.name || '—'}</h2>
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
           {filteredStudents.map((student) => (
             <div
@@ -137,7 +180,7 @@ function ClassroomDashboard() {
             >
               {/* Seat Label */}
               <div className="absolute top-2 left-2">
-                <span className="text-xs font-medium text-gray-400">{student.seat}</span>
+                <span className="text-xs font-medium text-gray-400">Seat {student.seat}</span>
               </div>
 
               {/* Avatar */}

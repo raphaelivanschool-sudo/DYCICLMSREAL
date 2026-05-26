@@ -138,16 +138,6 @@ function Login() {
               )}
             </button>
           </form>
-
-          {/* Demo Credentials */}
-          <div className="mt-6 p-4 bg-amber-50 border border-amber-200 rounded-lg">
-            <p className="text-xs font-medium text-amber-800 mb-2">Demo Credentials:</p>
-            <div className="space-y-1 text-xs text-amber-700">
-              <p><strong>Username:</strong> admin / <strong>Password:</strong> admin123</p>
-              <p><strong>Username:</strong> instructor1 / <strong>Password:</strong> instructor123</p>
-              <p><strong>Username:</strong> student1 / <strong>Password:</strong> student123</p>
-            </div>
-          </div>
         </div>
       </div>
 

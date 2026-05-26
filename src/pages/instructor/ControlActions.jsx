@@ -1,51 +1,130 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { 
   Users, CheckCircle, Lock, LockOpen, Monitor, Wifi, WifiOff, 
   MessageSquare, MonitorUp, X, ChevronDown, Eye, EyeOff, 
   AppWindow, Send, User
 } from 'lucide-react';
-import { mockStudents, mockClassSession } from '../../data/mockInstructorData';
+import instructorSessionService from '../../services/instructorSessionService';
+import { agentsApi } from '../../services/api';
 
 function ControlActions() {
   const [selectedStudent, setSelectedStudent] = useState('');
   const [showBroadcastModal, setShowBroadcastModal] = useState(false);
   const [broadcastMessage, setBroadcastMessage] = useState('');
   const [toast, setToast] = useState(null);
+  const [ctx, setCtx] = useState(null);
+  const [error, setError] = useState('');
   const [activeControls, setActiveControls] = useState({
     allScreensLocked: false,
     internetDisabled: false,
     screenSharing: false,
   });
 
-  const onlineStudents = mockStudents.filter(s => s.status === 'online');
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        setError('');
+        const data = await instructorSessionService.getActiveSession();
+        if (!cancelled) setCtx(data);
+      } catch (e) {
+        if (!cancelled) setError(e?.message || 'Failed to load session');
+      }
+    };
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const students = useMemo(() => {
+    const roster = ctx?.roster || [];
+    return roster.map((r) => ({
+      id: String(r.sessionStudentId ?? r.studentId),
+      studentId: r.studentId,
+      name: r?.student?.fullName || r?.student?.username || `Student ${r.studentId}`,
+      seat: r?.computer?.seatNumber != null ? String(r.computer.seatNumber) : '—',
+      status: r?.status || 'offline',
+      pc: r?.computer || null,
+      agent: r?.agent || null,
+    }));
+  }, [ctx]);
+
+  const onlineStudents = students.filter(s => s.status === 'online');
 
   const showToast = (message) => {
     setToast(message);
     setTimeout(() => setToast(null), 3000);
   };
 
-  const handleLockAll = () => {
+  const sendCommandToOnline = async (action, params = {}) => {
+    const targets = onlineStudents
+      .map((s) => ({
+        computerId: s?.agent?.id || null,
+        meta: {
+          ip: s?.pc?.ipAddress || undefined,
+          mac: s?.pc?.macAddress || undefined,
+        },
+      }))
+      .filter((t) => t.computerId || t.meta.ip || t.meta.mac);
+
+    if (targets.length === 0) {
+      showToast('No online agent PCs available for this action');
+      return;
+    }
+
+    await Promise.allSettled(
+      targets.map((t) => agentsApi.sendCommand(t.computerId, action, params, t.meta)),
+    );
+  };
+
+  const handleLockAll = async () => {
     setActiveControls({ ...activeControls, allScreensLocked: true });
-    showToast('All screens locked successfully');
+    try {
+      await sendCommandToOnline('lock');
+      showToast('Lock command sent to all online students');
+    } catch {
+      showToast('Failed to send lock command');
+    }
   };
 
-  const handleUnlockAll = () => {
+  const handleUnlockAll = async () => {
     setActiveControls({ ...activeControls, allScreensLocked: false });
-    showToast('All screens unlocked successfully');
+    try {
+      await sendCommandToOnline('unlock');
+      showToast('Unlock command sent to all online students');
+    } catch {
+      showToast('Failed to send unlock command');
+    }
   };
 
-  const handleBlankAll = () => {
-    showToast('All screens blanked');
+  const handleBlankAll = async () => {
+    try {
+      await sendCommandToOnline('blank_screen');
+      showToast('Blank screen command sent');
+    } catch {
+      showToast('Failed to send blank screen command');
+    }
   };
 
-  const handleDisableInternet = () => {
+  const handleDisableInternet = async () => {
     setActiveControls({ ...activeControls, internetDisabled: true });
-    showToast('Internet disabled for all students');
+    try {
+      await sendCommandToOnline('disable_wifi');
+      showToast('Disable Wi-Fi command sent');
+    } catch {
+      showToast('Failed to disable internet');
+    }
   };
 
-  const handleEnableInternet = () => {
+  const handleEnableInternet = async () => {
     setActiveControls({ ...activeControls, internetDisabled: false });
-    showToast('Internet enabled for all students');
+    try {
+      await sendCommandToOnline('enable_wifi');
+      showToast('Enable Wi-Fi command sent');
+    } catch {
+      showToast('Failed to enable internet');
+    }
   };
 
   const handleSendBroadcast = () => {
@@ -63,6 +142,11 @@ function ControlActions() {
 
   return (
     <div className="p-6 max-w-7xl mx-auto">
+      {!!error && (
+        <div className="mb-6 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl p-4 text-sm">
+          {error}
+        </div>
+      )}
       {/* Page Header */}
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-gray-900">Control Actions</h1>
@@ -76,8 +160,8 @@ function ControlActions() {
             <span className="text-sm font-medium text-gray-500">Total Students</span>
             <Users className="w-5 h-5 text-blue-500" />
           </div>
-          <div className="text-3xl font-bold text-gray-900">{mockStudents.length}</div>
-          <div className="text-xs text-gray-400 mt-1">In {mockClassSession.labName}</div>
+          <div className="text-3xl font-bold text-gray-900">{students.length}</div>
+          <div className="text-xs text-gray-400 mt-1">In {ctx?.laboratory?.name || '—'}</div>
         </div>
 
         <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
@@ -222,7 +306,7 @@ function ControlActions() {
                 className="w-full p-3 border border-gray-200 rounded-lg appearance-none bg-white focus:outline-none focus:ring-2 focus:ring-green-500"
               >
                 <option value="">Select a student...</option>
-                {mockStudents.filter(s => s.status === 'online').map((student) => (
+                {onlineStudents.map((student) => (
                   <option key={student.id} value={student.id}>
                     {student.name} - Seat {student.seat}
                   </option>
@@ -234,19 +318,87 @@ function ControlActions() {
 
           {selectedStudent && (
             <div className="grid grid-cols-2 gap-2 mt-4">
-              <button className="flex items-center justify-center gap-2 p-2 rounded-lg bg-red-50 text-red-700 hover:bg-red-100 text-sm font-medium">
+              <button
+                onClick={async () => {
+                  const target = students.find((s) => s.id === selectedStudent);
+                  if (!target) return;
+                  try {
+                    await agentsApi.sendCommand(
+                      target?.agent?.id || null,
+                      'lock',
+                      {},
+                      { ip: target?.pc?.ipAddress, mac: target?.pc?.macAddress },
+                    );
+                    showToast('Lock command sent');
+                  } catch {
+                    showToast('Failed to send lock command');
+                  }
+                }}
+                className="flex items-center justify-center gap-2 p-2 rounded-lg bg-red-50 text-red-700 hover:bg-red-100 text-sm font-medium"
+              >
                 <Lock className="w-4 h-4" />
                 Lock
               </button>
-              <button className="flex items-center justify-center gap-2 p-2 rounded-lg bg-green-50 text-green-700 hover:bg-green-100 text-sm font-medium">
+              <button
+                onClick={async () => {
+                  const target = students.find((s) => s.id === selectedStudent);
+                  if (!target) return;
+                  try {
+                    await agentsApi.sendCommand(
+                      target?.agent?.id || null,
+                      'screenshot',
+                      {},
+                      { ip: target?.pc?.ipAddress, mac: target?.pc?.macAddress },
+                    );
+                    showToast('Screenshot requested (check Screen Monitoring)');
+                  } catch {
+                    showToast('Failed to request screenshot');
+                  }
+                }}
+                className="flex items-center justify-center gap-2 p-2 rounded-lg bg-green-50 text-green-700 hover:bg-green-100 text-sm font-medium"
+              >
                 <Eye className="w-4 h-4" />
                 View
               </button>
-              <button className="flex items-center justify-center gap-2 p-2 rounded-lg bg-blue-50 text-blue-700 hover:bg-blue-100 text-sm font-medium">
+              <button
+                onClick={async () => {
+                  const target = students.find((s) => s.id === selectedStudent);
+                  if (!target) return;
+                  try {
+                    await agentsApi.sendCommand(
+                      target?.agent?.id || null,
+                      'message',
+                      { message: broadcastMessage || 'Please focus on the activity.' },
+                      { ip: target?.pc?.ipAddress, mac: target?.pc?.macAddress },
+                    );
+                    showToast('Message command sent');
+                  } catch {
+                    showToast('Failed to send message');
+                  }
+                }}
+                className="flex items-center justify-center gap-2 p-2 rounded-lg bg-blue-50 text-blue-700 hover:bg-blue-100 text-sm font-medium"
+              >
                 <MessageSquare className="w-4 h-4" />
                 Message
               </button>
-              <button className="flex items-center justify-center gap-2 p-2 rounded-lg bg-yellow-50 text-yellow-700 hover:bg-yellow-100 text-sm font-medium">
+              <button
+                onClick={async () => {
+                  const target = students.find((s) => s.id === selectedStudent);
+                  if (!target) return;
+                  try {
+                    await agentsApi.sendCommand(
+                      target?.agent?.id || null,
+                      activeControls.internetDisabled ? 'enable_wifi' : 'disable_wifi',
+                      {},
+                      { ip: target?.pc?.ipAddress, mac: target?.pc?.macAddress },
+                    );
+                    showToast(activeControls.internetDisabled ? 'Enable Wi-Fi sent' : 'Disable Wi-Fi sent');
+                  } catch {
+                    showToast('Failed to toggle internet');
+                  }
+                }}
+                className="flex items-center justify-center gap-2 p-2 rounded-lg bg-yellow-50 text-yellow-700 hover:bg-yellow-100 text-sm font-medium"
+              >
                 <WifiOff className="w-4 h-4" />
                 Internet
               </button>

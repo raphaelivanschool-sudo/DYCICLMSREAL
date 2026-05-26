@@ -1,20 +1,118 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Users, Wifi, Clock, WifiOff, Search, Monitor, Grid, Maximize2, X, Eye, Lock, MessageSquare } from 'lucide-react';
-import { mockStudents, mockClassSession } from '../../data/mockInstructorData';
+import instructorSessionService from '../../services/instructorSessionService';
+import { agentsApi } from '../../services/api';
+import socketService from '../../services/socketService';
 
 function StudentScreenMonitoring() {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedStudent, setSelectedStudent] = useState(null);
   const [viewMode, setViewMode] = useState('grid'); // 'grid' or 'focused'
+  const [ctx, setCtx] = useState(null);
+  const [error, setError] = useState('');
+  const [screenshots, setScreenshots] = useState(() => new Map());
+  const pendingRef = useRef(new Set());
+  const lastRequestRef = useRef(new Map());
 
-  const filteredStudents = mockStudents.filter(student =>
-    student.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    student.seat.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        setError('');
+        const data = await instructorSessionService.getActiveSession();
+        if (!cancelled) setCtx(data);
+      } catch (e) {
+        if (!cancelled) setError(e?.message || 'Failed to load session');
+      }
+    };
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
-  const onlineCount = mockStudents.filter(s => s.status === 'online').length;
-  const idleCount = mockStudents.filter(s => s.status === 'idle').length;
-  const offlineCount = mockStudents.filter(s => s.status === 'offline').length;
+  useEffect(() => {
+    socketService.connect();
+    const unsub = socketService.on('agent_command_result', (data) => {
+      if (!data || data.action !== 'screenshot') return;
+      if (!data.success || !data.result?.screenshot) return;
+
+      const computerId = data.computerId || data.resolvedComputerId || null;
+      if (!computerId) return;
+
+      const base64 = data.result.screenshot;
+      const dataUrl = `data:image/png;base64,${base64}`;
+      setScreenshots((prev) => {
+        const next = new Map(prev);
+        next.set(String(computerId), { dataUrl, timestamp: Date.now() });
+        return next;
+      });
+      pendingRef.current.delete(String(computerId));
+    });
+    return () => {
+      unsub?.();
+    };
+  }, []);
+
+  const students = useMemo(() => {
+    const roster = ctx?.roster || [];
+    return roster.map((r) => {
+      const seat = r?.computer?.seatNumber != null ? String(r.computer.seatNumber) : '—';
+      return {
+        id: String(r.sessionStudentId ?? r.studentId),
+        studentId: r.studentId,
+        name: r?.student?.fullName || r?.student?.username || `Student ${r.studentId}`,
+        seat,
+        status: r?.status || 'offline',
+        pcName: r?.computer?.name || '—',
+        pc: r?.computer || null,
+        agent: r?.agent || null,
+      };
+    });
+  }, [ctx]);
+
+  const filteredStudents = useMemo(() => {
+    const q = searchTerm.trim().toLowerCase();
+    if (!q) return students;
+    return students.filter((student) =>
+      student.name.toLowerCase().includes(q) ||
+      String(student.seat).toLowerCase().includes(q) ||
+      String(student.pcName).toLowerCase().includes(q)
+    );
+  }, [students, searchTerm]);
+
+  const onlineCount = students.filter(s => s.status === 'online').length;
+  const idleCount = students.filter(s => s.status === 'idle').length;
+  const offlineCount = students.filter(s => s.status === 'offline').length;
+
+  const requestScreenshot = async (student) => {
+    if (!student) return;
+    const targetKey = String(student.agent?.id || student.pc?.id || student.studentId);
+    const now = Date.now();
+    const last = lastRequestRef.current.get(targetKey) || 0;
+    if (now - last < 4000) return; // throttle per target
+    lastRequestRef.current.set(targetKey, now);
+
+    const resolvedComputerId = student?.agent?.id || null;
+    const meta = { ip: student?.pc?.ipAddress, mac: student?.pc?.macAddress };
+    try {
+      pendingRef.current.add(String(resolvedComputerId || meta.ip || meta.mac || targetKey));
+      await agentsApi.sendCommand(resolvedComputerId, 'screenshot', {}, meta);
+    } catch {
+      // ignore; UI will keep last known thumbnail / placeholder
+    }
+  };
+
+  useEffect(() => {
+    // lightweight polling: refresh thumbnails for online students
+    if (!students.length) return;
+    const interval = setInterval(() => {
+      students.filter((s) => s.status === 'online').slice(0, 12).forEach((s) => {
+        requestScreenshot(s);
+      });
+    }, 8000);
+    return () => clearInterval(interval);
+  }, [students]);
 
   const getStatusBadgeColor = (status) => {
     switch (status) {
@@ -41,6 +139,11 @@ function StudentScreenMonitoring() {
         <h1 className="text-2xl font-bold text-gray-900">Student Screen Monitoring</h1>
         <p className="text-gray-500">View live previews or thumbnails of student screens for real-time classroom management</p>
       </div>
+      {!!error && (
+        <div className="mb-6 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl p-4 text-sm">
+          {error}
+        </div>
+      )}
 
       {/* Stats Cards */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
@@ -113,7 +216,7 @@ function StudentScreenMonitoring() {
       {/* Screen Monitoring Grid */}
       <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold text-gray-900">Screen Monitoring - {mockClassSession.labName}</h2>
+          <h2 className="text-lg font-semibold text-gray-900">Screen Monitoring - {ctx?.laboratory?.name || '—'}</h2>
           <div className="flex items-center gap-2">
             <Monitor className="w-4 h-4 text-gray-400" />
             <span className="text-sm text-gray-500">Thumbnail Mode</span>
@@ -124,7 +227,10 @@ function StudentScreenMonitoring() {
           {filteredStudents.map((student) => (
             <div
               key={student.id}
-              onClick={() => setSelectedStudent(student)}
+              onClick={() => {
+                setSelectedStudent(student);
+                requestScreenshot(student);
+              }}
               className="group cursor-pointer"
             >
               {/* Thumbnail Container */}
@@ -137,12 +243,26 @@ function StudentScreenMonitoring() {
                       <span className="text-xs text-gray-400">Offline</span>
                     </div>
                   ) : (
-                    <div className="text-center">
-                      <div className="w-16 h-10 bg-gray-700 rounded mx-auto mb-2 flex items-center justify-center">
-                        <Monitor className="w-6 h-6 text-gray-500" />
-                      </div>
-                      <span className="text-xs text-gray-400">Screen Preview</span>
-                    </div>
+                    (() => {
+                      const shot = student.agent?.id ? screenshots.get(String(student.agent.id)) : null;
+                      if (shot?.dataUrl) {
+                        return (
+                          <img
+                            src={shot.dataUrl}
+                            alt={`${student.name} screen`}
+                            className="w-full h-full object-cover"
+                          />
+                        );
+                      }
+                      return (
+                        <div className="text-center">
+                          <div className="w-16 h-10 bg-gray-700 rounded mx-auto mb-2 flex items-center justify-center">
+                            <Monitor className="w-6 h-6 text-gray-500" />
+                          </div>
+                          <span className="text-xs text-gray-400">Waiting for preview…</span>
+                        </div>
+                      );
+                    })()
                   )}
                 </div>
 
@@ -213,26 +333,71 @@ function StudentScreenMonitoring() {
                     <span className="text-lg text-gray-400">Student is offline</span>
                   </div>
                 ) : (
-                  <div className="text-center">
-                    <div className="w-32 h-20 bg-gray-700 rounded mx-auto mb-4 flex items-center justify-center">
-                      <Monitor className="w-12 h-12 text-gray-500" />
-                    </div>
-                    <span className="text-lg text-gray-400">Live Screen Preview</span>
-                  </div>
+                  (() => {
+                    const shot = selectedStudent.agent?.id ? screenshots.get(String(selectedStudent.agent.id)) : null;
+                    if (shot?.dataUrl) {
+                      return (
+                        <img
+                          src={shot.dataUrl}
+                          alt={`${selectedStudent.name} screen`}
+                          className="w-full h-full object-cover"
+                        />
+                      );
+                    }
+                    return (
+                      <div className="text-center">
+                        <div className="w-32 h-20 bg-gray-700 rounded mx-auto mb-4 flex items-center justify-center">
+                          <Monitor className="w-12 h-12 text-gray-500" />
+                        </div>
+                        <span className="text-lg text-gray-400">Fetching preview…</span>
+                      </div>
+                    );
+                  })()
                 )}
               </div>
 
               {/* Action Buttons */}
               <div className="flex justify-center gap-3 mt-4">
-                <button className="flex items-center gap-2 px-6 py-2 bg-green-50 text-green-700 rounded-lg hover:bg-green-100 font-medium">
+                <button
+                  onClick={() => requestScreenshot(selectedStudent)}
+                  className="flex items-center gap-2 px-6 py-2 bg-green-50 text-green-700 rounded-lg hover:bg-green-100 font-medium"
+                >
                   <Eye className="w-4 h-4" />
-                  Full Screen View
+                  Refresh
                 </button>
-                <button className="flex items-center gap-2 px-6 py-2 bg-red-50 text-red-700 rounded-lg hover:bg-red-100 font-medium">
+                <button
+                  onClick={async () => {
+                    try {
+                      await agentsApi.sendCommand(
+                        selectedStudent?.agent?.id || null,
+                        'lock',
+                        {},
+                        { ip: selectedStudent?.pc?.ipAddress, mac: selectedStudent?.pc?.macAddress },
+                      );
+                    } catch {
+                      // ignore
+                    }
+                  }}
+                  className="flex items-center gap-2 px-6 py-2 bg-red-50 text-red-700 rounded-lg hover:bg-red-100 font-medium"
+                >
                   <Lock className="w-4 h-4" />
                   Lock Screen
                 </button>
-                <button className="flex items-center gap-2 px-6 py-2 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 font-medium">
+                <button
+                  onClick={async () => {
+                    try {
+                      await agentsApi.sendCommand(
+                        selectedStudent?.agent?.id || null,
+                        'message',
+                        { message: 'Please focus on the activity.' },
+                        { ip: selectedStudent?.pc?.ipAddress, mac: selectedStudent?.pc?.macAddress },
+                      );
+                    } catch {
+                      // ignore
+                    }
+                  }}
+                  className="flex items-center gap-2 px-6 py-2 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 font-medium"
+                >
                   <MessageSquare className="w-4 h-4" />
                   Send Message
                 </button>

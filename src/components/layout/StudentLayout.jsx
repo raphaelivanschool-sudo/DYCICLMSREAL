@@ -9,7 +9,8 @@ import {
   MessageCircle,
   ClipboardList,
 } from 'lucide-react';
-import { mockStudentSession } from '../../data/mockStudentData';
+import { useEffect, useMemo, useState } from 'react';
+import sessionContextService from '../../services/sessionContextService';
 
 const navigation = [
   { name: 'Session Dashboard', href: '/student/dashboard', icon: LayoutDashboard },
@@ -21,12 +22,59 @@ const navigation = [
 function StudentLayout() {
   const location = useLocation();
   const navigate = useNavigate();
+  const [ctx, setCtx] = useState(null);
+  const [ctxError, setCtxError] = useState('');
 
   const handleLogout = () => {
     // Clear all localStorage items
     localStorage.clear();
     navigate('/');
   };
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        setCtxError('');
+        const data = await sessionContextService.getStudentContext();
+        if (!cancelled) setCtx(data);
+      } catch (e) {
+        if (!cancelled) setCtxError(e?.message || 'Failed to load session context');
+      }
+    };
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const sidebarSession = useMemo(() => {
+    const labName = ctx?.laboratory?.name || 'No active session';
+    const room = ctx?.laboratory?.roomNumber || ctx?.laboratory?.location || '';
+    const isActive = !!ctx?.hasActiveSession;
+
+    const user = (() => {
+      const raw = localStorage.getItem('user');
+      if (!raw) return null;
+      try {
+        return JSON.parse(raw);
+      } catch {
+        return null;
+      }
+    })();
+
+    const fullName = user?.fullName || user?.username || 'Student';
+    const initials = String(fullName)
+      .split(' ')
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((s) => s[0]?.toUpperCase())
+      .join('') || 'S';
+
+    const pcName = ctx?.assignment?.computer?.name || '';
+
+    return { labName, room, isActive, fullName, initials, pcName };
+  }, [ctx]);
 
   const getBreadcrumb = () => {
     const path = location.pathname;
@@ -52,12 +100,17 @@ function StudentLayout() {
         {/* Current Session Info */}
         <div className="p-4 border-b border-slate-700">
           <p className="text-xs text-slate-400 mb-1">Current Session</p>
-          <p className="text-sm font-medium text-white">{mockStudentSession.labName}</p>
-          <p className="text-xs text-slate-400">{mockStudentSession.roomNumber}</p>
+          <p className="text-sm font-medium text-white">{sidebarSession.labName}</p>
+          <p className="text-xs text-slate-400">{sidebarSession.room}</p>
           <div className="mt-2 flex items-center">
-            <span className="w-2 h-2 bg-green-500 rounded-full mr-2"></span>
-            <span className="text-xs text-green-400">Active</span>
+            <span className={`w-2 h-2 rounded-full mr-2 ${sidebarSession.isActive ? 'bg-green-500' : 'bg-slate-500'}`}></span>
+            <span className={`text-xs ${sidebarSession.isActive ? 'text-green-400' : 'text-slate-400'}`}>{sidebarSession.isActive ? 'Active' : 'Inactive'}</span>
           </div>
+          {!!ctxError && (
+            <p className="mt-2 text-[11px] text-amber-300">
+              {ctxError}
+            </p>
+          )}
         </div>
 
         {/* Navigation */}
@@ -89,11 +142,11 @@ function StudentLayout() {
         <div className="border-t border-slate-700 p-4">
           <div className="flex items-center mb-3">
             <div className="w-8 h-8 bg-orange-600 rounded-full flex items-center justify-center mr-3">
-              <span className="text-white text-xs font-semibold">{mockStudentSession.studentInitials}</span>
+              <span className="text-white text-xs font-semibold">{sidebarSession.initials}</span>
             </div>
             <div>
-              <p className="text-white text-sm font-medium">{mockStudentSession.studentName}</p>
-              <p className="text-slate-400 text-xs">{mockStudentSession.pcName}</p>
+              <p className="text-white text-sm font-medium">{sidebarSession.fullName}</p>
+              <p className="text-slate-400 text-xs">{sidebarSession.pcName}</p>
             </div>
           </div>
           <button
