@@ -11,6 +11,7 @@ import {
   CheckCircle,
   GraduationCap
 } from 'lucide-react';
+import { getUser } from '../../utils/auth';
 
 const navigation = [
   { name: 'Classroom Dashboard', href: '/instructor/dashboard', icon: LayoutDashboard },
@@ -24,6 +25,10 @@ const navigation = [
 function InstructorLayout() {
   const location = useLocation();
   const navigate = useNavigate();
+  const user = getUser();
+  const label = user?.fullName || 'Instructor';
+  const initials = label.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase();
+  const roleLabel = user?.role ? user.role.charAt(0) + user.role.slice(1).toLowerCase() : 'Instructor';
 
   const handleLogout = () => {
     // Clear all localStorage items
@@ -81,11 +86,11 @@ function InstructorLayout() {
         <div className="border-t border-slate-700 p-4">
           <div className="flex items-center mb-3">
             <div className="w-8 h-8 bg-green-600 rounded-full flex items-center justify-center mr-3">
-              <span className="text-white text-xs font-semibold">MC</span>
+              <span className="text-white text-xs font-semibold">{initials}</span>
             </div>
             <div>
-              <p className="text-white text-sm font-medium">Mr. Cruz</p>
-              <p className="text-slate-400 text-xs">EdTech Laboratory</p>
+              <p className="text-white text-sm font-medium">{label}</p>
+              <p className="text-slate-400 text-xs">{roleLabel}</p>
             </div>
           </div>
           <button
@@ -116,9 +121,9 @@ function InstructorLayout() {
             <div className="w-px h-6 bg-gray-300"></div>
             <div className="flex items-center">
               <div className="w-8 h-8 bg-green-600 rounded-full flex items-center justify-center mr-2">
-                <span className="text-white text-xs font-semibold">MC</span>
+                <span className="text-white text-xs font-semibold">{initials}</span>
               </div>
-              <span className="text-sm font-medium text-gray-700">Mr. Cruz</span>
+              <span className="text-sm font-medium text-gray-700">{label}</span>
             </div>
           </div>
         </header>

@@ -31,6 +31,7 @@ function SupportTicket() {
   });
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
+  const [viewingTicket, setViewingTicket] = useState(null);
   const [toast, setToast] = useState(null);
   const [formData, setFormData] = useState({
     title: '',
@@ -370,7 +371,7 @@ function SupportTicket() {
                       {new Date(ticket.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      <button className="p-1 hover:bg-gray-100 rounded">
+                      <button onClick={() => setViewingTicket(ticket)} className="p-1 hover:bg-gray-100 rounded">
                         <Eye className="w-4 h-4" />
                       </button>
                     </td>
@@ -381,6 +382,65 @@ function SupportTicket() {
           )}
         </div>
       </div>
+
+      {/* Ticket Detail Modal */}
+      {viewingTicket && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4">
+            <div className="flex items-center justify-between p-4 border-b border-gray-200">
+              <h3 className="text-lg font-semibold text-gray-900">Ticket Details</h3>
+              <button onClick={() => setViewingTicket(null)} className="p-1 hover:bg-gray-100 rounded-lg">
+                <X className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3">
+              <div className="flex justify-between items-center">
+                <span className="text-sm text-gray-500">Ticket ID</span>
+                <span className="text-sm font-medium text-blue-600">{viewingTicket.ticketId}</span>
+              </div>
+              <div className="flex justify-between items-start">
+                <span className="text-sm text-gray-500">Title</span>
+                <span className="text-sm font-medium text-gray-900 text-right max-w-[60%]">{viewingTicket.title}</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-sm text-gray-500">Category</span>
+                <span className="text-sm text-gray-700">{viewingTicket.category}</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-sm text-gray-500">Priority</span>
+                <span className={`text-sm font-medium ${getPriorityColor(viewingTicket.priority)}`}>{viewingTicket.priority}</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-sm text-gray-500">Status</span>
+                <span className={`px-2 py-1 text-xs font-medium rounded-full border ${getStatusBadgeColor(viewingTicket.status)}`}>
+                  {viewingTicket.status.replace(/_/g, ' ')}
+                </span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-sm text-gray-500">Created</span>
+                <span className="text-sm text-gray-700">{new Date(viewingTicket.createdAt).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
+              </div>
+              {viewingTicket.updatedAt && viewingTicket.updatedAt !== viewingTicket.createdAt && (
+                <div className="flex justify-between items-center">
+                  <span className="text-sm text-gray-500">Updated</span>
+                  <span className="text-sm text-gray-700">{new Date(viewingTicket.updatedAt).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
+                </div>
+              )}
+              {viewingTicket.description && (
+                <div className="pt-2 border-t border-gray-100">
+                  <p className="text-sm text-gray-500 mb-1">Description</p>
+                  <p className="text-sm text-gray-800 whitespace-pre-wrap">{viewingTicket.description}</p>
+                </div>
+              )}
+            </div>
+            <div className="p-4 border-t border-gray-200 flex justify-end">
+              <button onClick={() => setViewingTicket(null)} className="px-4 py-2 bg-gray-900 text-white rounded-lg hover:bg-gray-800 font-medium text-sm">
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Toast Notification */}
       {toast && (

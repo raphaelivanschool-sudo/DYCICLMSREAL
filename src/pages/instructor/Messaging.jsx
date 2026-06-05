@@ -230,12 +230,21 @@ function Messaging() {
     student.name?.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
-  const handleBroadcast = () => {
-    if (broadcastMessage.trim()) {
-      // TODO: Implement broadcast via socket
-      setBroadcastMessage('');
-      setShowBroadcastModal(false);
+  const handleBroadcast = async () => {
+    if (!broadcastMessage.trim()) return;
+    const msg = broadcastMessage.trim();
+    setBroadcastMessage('');
+    setShowBroadcastModal(false);
+    let sent = 0;
+    for (const student of students) {
+      try {
+        await messagingService.sendMessage(student.id, msg);
+        sent++;
+      } catch {
+        // skip unreachable
+      }
     }
+    console.log(`[Messaging] Broadcast sent to ${sent}/${students.length} student(s)`);
   };
 
   return (

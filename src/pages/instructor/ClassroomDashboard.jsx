@@ -1,12 +1,37 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Users, Wifi, Clock, WifiOff, Search, Monitor, Lock, MessageSquare, Eye, X } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { Users, Wifi, Clock, WifiOff, Search, Monitor, Lock, MessageSquare, Eye, X, Send } from 'lucide-react';
 import instructorSessionService from '../../services/instructorSessionService';
+import { agentsApi } from '../../services/api';
 
 function ClassroomDashboard() {
+  const navigate = useNavigate();
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedStudent, setSelectedStudent] = useState(null);
   const [ctx, setCtx] = useState(null);
   const [error, setError] = useState('');
+  const [toast, setToast] = useState(null);
+  const [messageText, setMessageText] = useState('');
+  const [showMessageInput, setShowMessageInput] = useState(false);
+
+  const showToast = (msg) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 3000);
+  };
+
+  const sendStudentCommand = async (student, action, params = {}) => {
+    try {
+      await agentsApi.sendCommand(
+        student?.agent?.id || null,
+        action,
+        params,
+        { ip: student?.pc?.ipAddress || student?.ip, mac: student?.pc?.macAddress || student?.mac }
+      );
+      showToast(`${action} sent to ${student.name}`);
+    } catch (e) {
+      showToast(`Failed: ${e?.response?.data?.error || e?.message || action}`);
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -208,14 +233,26 @@ function ClassroomDashboard() {
               </div>
 
               {/* Action Buttons */}
-              <div className="flex justify-center gap-2">
-                <button className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600">
+              <div className="flex justify-center gap-2" onClick={(e) => e.stopPropagation()}>
+                <button
+                  title="View Screen"
+                  onClick={() => navigate('/instructor/monitoring')}
+                  className="p-1.5 rounded-lg hover:bg-green-100 text-gray-400 hover:text-green-600"
+                >
                   <Eye className="w-4 h-4" />
                 </button>
-                <button className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600">
+                <button
+                  title="Lock Screen"
+                  onClick={() => sendStudentCommand(student, 'lock')}
+                  className="p-1.5 rounded-lg hover:bg-red-100 text-gray-400 hover:text-red-600"
+                >
                   <Lock className="w-4 h-4" />
                 </button>
-                <button className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600">
+                <button
+                  title="Send Message"
+                  onClick={() => sendStudentCommand(student, 'message', { message: 'Please focus on the activity.' })}
+                  className="p-1.5 rounded-lg hover:bg-blue-100 text-gray-400 hover:text-blue-600"
+                >
                   <MessageSquare className="w-4 h-4" />
                 </button>
               </div>
@@ -224,6 +261,13 @@ function ClassroomDashboard() {
         </div>
       </div>
 
+      {/* Toast */}
+      {toast && (
+        <div className="fixed bottom-4 right-4 bg-gray-800 text-white px-4 py-2 rounded-lg shadow-lg z-50 text-sm">
+          {toast}
+        </div>
+      )}
+
       {/* Selected Student Modal */}
       {selectedStudent && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
@@ -231,7 +275,7 @@ function ClassroomDashboard() {
             <div className="flex items-center justify-between p-4 border-b border-gray-200">
               <h3 className="text-lg font-semibold text-gray-900">Student Controls</h3>
               <button
-                onClick={() => setSelectedStudent(null)}
+                onClick={() => { setSelectedStudent(null); setShowMessageInput(false); setMessageText(''); }}
                 className="p-1 hover:bg-gray-100 rounded-lg"
               >
                 <X className="w-5 h-5 text-gray-500" />
@@ -250,23 +294,65 @@ function ClassroomDashboard() {
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-3">
-                <button className="flex items-center justify-center gap-2 px-4 py-2 bg-green-50 text-green-700 rounded-lg hover:bg-green-100">
+                <button
+                  onClick={() => { navigate('/instructor/monitoring'); setSelectedStudent(null); }}
+                  className="flex items-center justify-center gap-2 px-4 py-2 bg-green-50 text-green-700 rounded-lg hover:bg-green-100"
+                >
                   <Eye className="w-4 h-4" />
                   View Screen
                 </button>
-                <button className="flex items-center justify-center gap-2 px-4 py-2 bg-red-50 text-red-700 rounded-lg hover:bg-red-100">
+                <button
+                  onClick={() => sendStudentCommand(selectedStudent, 'lock')}
+                  className="flex items-center justify-center gap-2 px-4 py-2 bg-red-50 text-red-700 rounded-lg hover:bg-red-100"
+                >
                   <Lock className="w-4 h-4" />
                   Lock Screen
                 </button>
-                <button className="flex items-center justify-center gap-2 px-4 py-2 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100">
+                <button
+                  onClick={() => setShowMessageInput(!showMessageInput)}
+                  className="flex items-center justify-center gap-2 px-4 py-2 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100"
+                >
                   <MessageSquare className="w-4 h-4" />
                   Message
                 </button>
-                <button className="flex items-center justify-center gap-2 px-4 py-2 bg-gray-50 text-gray-700 rounded-lg hover:bg-gray-100">
+                <button
+                  onClick={() => { showToast('Remote control requires the PC agent to be connected.'); }}
+                  className="flex items-center justify-center gap-2 px-4 py-2 bg-gray-50 text-gray-700 rounded-lg hover:bg-gray-100"
+                >
                   <Monitor className="w-4 h-4" />
                   Remote Control
                 </button>
               </div>
+              {showMessageInput && (
+                <div className="mt-3 flex gap-2">
+                  <input
+                    type="text"
+                    value={messageText}
+                    onChange={(e) => setMessageText(e.target.value)}
+                    placeholder="Type a message..."
+                    className="flex-1 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && messageText.trim()) {
+                        sendStudentCommand(selectedStudent, 'message', { message: messageText.trim() });
+                        setMessageText('');
+                        setShowMessageInput(false);
+                      }
+                    }}
+                  />
+                  <button
+                    onClick={() => {
+                      if (messageText.trim()) {
+                        sendStudentCommand(selectedStudent, 'message', { message: messageText.trim() });
+                        setMessageText('');
+                        setShowMessageInput(false);
+                      }
+                    }}
+                    className="px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                  >
+                    <Send className="w-4 h-4" />
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </div>

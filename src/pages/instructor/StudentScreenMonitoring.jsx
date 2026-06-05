@@ -152,7 +152,7 @@ function StudentScreenMonitoring() {
             <span className="text-sm font-medium text-gray-500">Total Students</span>
             <Users className="w-5 h-5 text-blue-500" />
           </div>
-          <div className="text-3xl font-bold text-gray-900">{mockStudents.length}</div>
+          <div className="text-3xl font-bold text-gray-900">{students.length}</div>
           <div className="text-xs text-gray-400 mt-1">Active sessions</div>
         </div>
 

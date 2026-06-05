@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { 
   User, 
   Monitor, 
@@ -16,6 +17,7 @@ import {
 import sessionContextService from '../../services/sessionContextService';
 
 function SessionDashboard() {
+  const navigate = useNavigate();
   // Get actual user data from localStorage
   const [currentUser, setCurrentUser] = useState(() => {
     const stored = localStorage.getItem('user');
@@ -163,27 +165,25 @@ function SessionDashboard() {
         <h2 className="text-lg font-semibold text-gray-900 mb-4">Quick Actions</h2>
         <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
           {/* Announcements */}
-          <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm text-center cursor-pointer hover:shadow-md transition-shadow">
+          <div onClick={() => navigate('/student/messaging')} className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm text-center cursor-pointer hover:shadow-md transition-shadow">
             <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-3">
               <Megaphone className="w-6 h-6 text-blue-600" />
-              <span className="absolute top-0 right-0 w-5 h-5 bg-red-500 text-white text-xs rounded-full flex items-center justify-center">2</span>
             </div>
             <p className="font-medium text-gray-900">Announcements</p>
-            <p className="text-xs text-gray-400">2 unread</p>
+            <p className="text-xs text-gray-400">View messages</p>
           </div>
 
           {/* Chats */}
-          <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm text-center cursor-pointer hover:shadow-md transition-shadow relative">
+          <div onClick={() => navigate('/student/messaging')} className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm text-center cursor-pointer hover:shadow-md transition-shadow relative">
             <div className="w-12 h-12 bg-purple-100 rounded-full flex items-center justify-center mx-auto mb-3">
               <MessageCircle className="w-6 h-6 text-purple-600" />
-              <span className="absolute top-0 right-0 w-5 h-5 bg-red-500 text-white text-xs rounded-full flex items-center justify-center">3</span>
             </div>
             <p className="font-medium text-gray-900">Chats</p>
-            <p className="text-xs text-gray-400">3 messages</p>
+            <p className="text-xs text-gray-400">Open messages</p>
           </div>
 
           {/* Submit Ticket */}
-          <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm text-center cursor-pointer hover:shadow-md transition-shadow">
+          <div onClick={() => navigate('/student/tickets')} className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm text-center cursor-pointer hover:shadow-md transition-shadow">
             <div className="w-12 h-12 bg-orange-100 rounded-full flex items-center justify-center mx-auto mb-3">
               <Ticket className="w-6 h-6 text-orange-600" />
             </div>
@@ -191,17 +191,17 @@ function SessionDashboard() {
             <p className="text-xs text-gray-400">Report issues</p>
           </div>
 
-          {/* Attendance */}
-          <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm text-center cursor-pointer hover:shadow-md transition-shadow">
+          {/* My Grades */}
+          <div onClick={() => navigate('/student/my-grades')} className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm text-center cursor-pointer hover:shadow-md transition-shadow">
             <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-3">
               <CheckCircle className="w-6 h-6 text-green-600" />
             </div>
-            <p className="font-medium text-gray-900">Attendance</p>
-            <p className="text-xs text-gray-400">Confirm presence</p>
+            <p className="font-medium text-gray-900">My Grades</p>
+            <p className="text-xs text-gray-400">View results</p>
           </div>
 
           {/* Help Request */}
-          <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm text-center cursor-pointer hover:shadow-md transition-shadow">
+          <div onClick={() => navigate('/student/tickets')} className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm text-center cursor-pointer hover:shadow-md transition-shadow">
             <div className="w-12 h-12 bg-purple-100 rounded-full flex items-center justify-center mx-auto mb-3">
               <HelpCircle className="w-6 h-6 text-purple-600" />
             </div>

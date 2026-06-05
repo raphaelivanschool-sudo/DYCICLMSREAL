@@ -19,6 +19,7 @@ function ControlActions() {
     internetDisabled: false,
     screenSharing: false,
   });
+  const [blockedApps, setBlockedApps] = useState({});
 
   useEffect(() => {
     let cancelled = false;
@@ -127,12 +128,12 @@ function ControlActions() {
     }
   };
 
-  const handleSendBroadcast = () => {
-    if (broadcastMessage.trim()) {
-      showToast(`Broadcast sent: "${broadcastMessage}"`);
-      setBroadcastMessage('');
-      setShowBroadcastModal(false);
-    }
+  const handleSendBroadcast = async () => {
+    if (!broadcastMessage.trim()) return;
+    await sendCommandToOnline('message', { message: broadcastMessage });
+    showToast(`Broadcast sent to ${onlineStudents.length} student(s)`);
+    setBroadcastMessage('');
+    setShowBroadcastModal(false);
   };
 
   const handleScreenShare = () => {
@@ -261,8 +262,19 @@ function ControlActions() {
                     <AppWindow className="w-4 h-4 text-gray-400" />
                     <span className="text-sm text-gray-600">{app}</span>
                   </div>
-                  <button className="relative w-10 h-5 bg-gray-200 rounded-full transition-colors focus:outline-none">
-                    <span className="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform"></span>
+                  <button
+                    onClick={() => {
+                      const next = !blockedApps[app];
+                      setBlockedApps(prev => ({ ...prev, [app]: next }));
+                      sendCommandToOnline('message', {
+                        message: next
+                          ? `[Instructor] ${app} has been restricted on this computer.`
+                          : `[Instructor] ${app} restriction has been lifted.`
+                      });
+                    }}
+                    className={`relative w-10 h-5 rounded-full transition-colors focus:outline-none ${blockedApps[app] ? 'bg-red-500' : 'bg-gray-200'}`}
+                  >
+                    <span className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${blockedApps[app] ? 'left-5' : 'left-0.5'}`} />
                   </button>
                 </div>
               ))}
