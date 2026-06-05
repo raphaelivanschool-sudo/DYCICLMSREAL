@@ -2,12 +2,54 @@ const io = require('socket.io-client');
 const si = require('systeminformation');
 const screenshotDesktop = require('screenshot-desktop');
 const os = require('os');
-const { exec } = require('child_process');
+const { exec, spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs').promises;
 const http = require('http');
 const https = require('https');
 const util = require('util');
+
+// --- Projection state ---
+let projectionProcess = null;
+const PROJECTION_FRAME_PATH = path.join(os.tmpdir(), 'dyci_projection_frame.jpg');
+const PROJECTION_FRAME_TMP  = PROJECTION_FRAME_PATH + '.tmp';
+const PROJECTION_VIEWER_PS1 = path.join(os.tmpdir(), 'dyci_projection_viewer.ps1');
+
+const PROJECTION_VIEWER_SCRIPT = `
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$form = New-Object System.Windows.Forms.Form
+$form.FormBorderStyle = 'None'
+$form.WindowState = 'Maximized'
+$form.TopMost = $true
+$form.BackColor = [System.Drawing.Color]::Black
+$pb = New-Object System.Windows.Forms.PictureBox
+$pb.Dock = 'Fill'
+$pb.SizeMode = 'Zoom'
+$form.Controls.Add($pb)
+$framePath = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), 'dyci_projection_frame.jpg')
+$timer = New-Object System.Windows.Forms.Timer
+$timer.Interval = 150
+$lastMod = [datetime]::MinValue
+$timer.Add_Tick({
+    try {
+        if ([System.IO.File]::Exists($framePath)) {
+            $mod = [System.IO.File]::GetLastWriteTime($framePath)
+            if ($mod -ne $lastMod) {
+                $lastMod = $mod
+                $bytes = [System.IO.File]::ReadAllBytes($framePath)
+                $ms = New-Object System.IO.MemoryStream(, $bytes)
+                $img = [System.Drawing.Image]::FromStream($ms)
+                if ($pb.Image) { $pb.Image.Dispose() }
+                $pb.Image = $img
+            }
+        }
+    } catch {}
+})
+$timer.Start()
+$form.Add_KeyDown({ if ($_.KeyCode -eq [System.Windows.Forms.Keys]::Escape) { $form.Close() } })
+$form.ShowDialog()
+`;
 
 function normalizeServerUrl(url) {
   const s = String(url || '').trim().replace(/\/+$/, '');
@@ -330,6 +372,19 @@ async function connect() {
       await executeCommand(command);
     });
 
+    // High-frequency projection frame delivery — no response needed
+    socket.on('projection_frame', async (data) => {
+      try {
+        const { screenshot } = data || {};
+        if (!screenshot || typeof screenshot !== 'string') return;
+        const buf = Buffer.from(screenshot, 'base64');
+        await fs.writeFile(PROJECTION_FRAME_TMP, buf);
+        await fs.rename(PROJECTION_FRAME_TMP, PROJECTION_FRAME_PATH);
+      } catch (err) {
+        console.error('[Projection] Frame write error:', err.message);
+      }
+    });
+
     // Handle disconnection
     socket.on('disconnect', (reason) => {
       console.log(`Disconnected from server: ${reason}`);
@@ -395,6 +450,12 @@ async function executeCommand(command) {
         break;
       case 'screenshot':
         result = await takeScreenshot();
+        break;
+      case 'projection_start':
+        await startProjectionViewer();
+        break;
+      case 'projection_stop':
+        await stopProjectionViewer();
         break;
       default:
         console.log(`Unknown command: ${action}`);
@@ -582,6 +643,33 @@ async function takeScreenshot() {
   };
 }
 
+async function startProjectionViewer() {
+  await stopProjectionViewer();
+  await fs.writeFile(PROJECTION_VIEWER_PS1, PROJECTION_VIEWER_SCRIPT, 'utf8');
+  projectionProcess = spawn(
+    'powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', PROJECTION_VIEWER_PS1],
+    { detached: true, stdio: 'ignore', windowsHide: false }
+  );
+  projectionProcess.unref();
+  console.log('[Projection] Viewer started PID:', projectionProcess.pid);
+  projectionProcess.on('exit', () => {
+    console.log('[Projection] Viewer exited');
+    projectionProcess = null;
+  });
+}
+
+async function stopProjectionViewer() {
+  if (projectionProcess) {
+    try { exec(`taskkill /PID ${projectionProcess.pid} /T /F`, () => {}); } catch {}
+    projectionProcess = null;
+  }
+  try { await fs.unlink(PROJECTION_FRAME_PATH); } catch {}
+  try { await fs.unlink(PROJECTION_FRAME_TMP);  } catch {}
+  try { await fs.unlink(PROJECTION_VIEWER_PS1); } catch {}
+  console.log('[Projection] Viewer stopped');
+}
+
 // Lock computer (Windows)
 async function lockComputer() {
   return new Promise((resolve) => {
@@ -712,20 +800,22 @@ function stopStatusUpdates() {
 }
 
 // Handle process termination
-process.on('SIGINT', () => {
+process.on('SIGINT', async () => {
   console.log('Shutting down agent...');
   stopHeartbeat();
   stopStatusUpdates();
+  await stopProjectionViewer();
   if (socket) {
     socket.disconnect();
   }
   process.exit(0);
 });
 
-process.on('SIGTERM', () => {
+process.on('SIGTERM', async () => {
   console.log('Shutting down agent...');
   stopHeartbeat();
   stopStatusUpdates();
+  await stopProjectionViewer();
   if (socket) {
     socket.disconnect();
   }

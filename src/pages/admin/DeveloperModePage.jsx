@@ -355,26 +355,11 @@ function DeveloperModePage() {
     const ip = selectedDevice?.ip;
     const mac = selectedDevice?.mac;
 
+    setProjectionStatus('Opening projection viewer on target PC...');
     try {
-      setProjectionStatus('Waiting for target PC confirmation popup...');
-      await agentsApi.requestProjectionPermission(
-        agentId,
-        { sender_hostname: window.location.hostname || 'dyci-host' },
-        { ip, mac }
-      );
-      // For older guest agents that don't open UI on accept, open it best-effort.
-      try {
-        await agentsApi.openProjectionWindow(agentId, { ip, mac });
-      } catch {
-        // ignore
-      }
+      await agentsApi.openProjectionWindow(agentId, { ip, mac });
     } catch (e) {
-      stream.getTracks().forEach((t) => t.stop());
-      projectionRunningRef.current = false;
-      setProjectionActive(false);
-      const msg = e.response?.data?.error || e.message || 'Target did not accept projection request';
-      setProjectionStatus(`✗ ${msg}`);
-      return;
+      console.warn('[Projection] openProjectionWindow:', e?.message);
     }
 
     const sendFrame = async () => {

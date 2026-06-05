@@ -431,17 +431,7 @@ const PC_AGENT_PORT = parseInt(process.env.PC_AGENT_HTTP_PORT || '5555', 10);
 /** Forward host screen frame to guest PC Flask agent (Python /project). */
 router.post('/projection/frame', authenticateToken, async (req, res) => {
   try {
-    const apiKey = getPcAgentApiKey();
-    if (!apiKey) {
-      return res.status(503).json({
-        success: false,
-        error:
-          `Python agent API key not configured. Set PC_AGENT_API_KEY in server/.env, ` +
-            `or PC_AGENT_CONFIG_PATH to agent_config.json, or place agent_config.json at ${getPcAgentConfigPathTried()} ` +
-            `(api_key must match the guest PC Python agent).`,
-      });
-    }
-
+    const io = req.app.get('io');
     const connectedComputers = req.app.get('connectedComputers');
     const { computerId, ip, mac, screenshot, sender_hostname, timestamp } = req.body || {};
 
@@ -449,139 +439,47 @@ router.post('/projection/frame', authenticateToken, async (req, res) => {
       return res.status(400).json({ success: false, error: 'screenshot (base64 JPEG) is required' });
     }
 
-    const { targetId, strategy } = pickAgentTargetId(connectedComputers, {
-      computerId,
-      ip,
-      mac,
-    });
+    const { targetId, strategy } = pickAgentTargetId(connectedComputers, { computerId, ip, mac });
 
     if (!targetId) {
       return res.status(404).json({
         success: false,
-        error:
-          'No online agent matches this PC. Select a row that maps to a connected agent.',
+        error: 'No online agent matches this PC. Ensure the DYCI agent is running and connected.',
       });
     }
 
-    const lanIp = resolveLanIpForPcAgent(connectedComputers, targetId, ip);
-    if (!lanIp) {
-      return res.status(400).json({
-        success: false,
-        error: 'Could not resolve LAN IP for the guest agent (enable discovery IP or fix agent registration).',
-      });
-    }
-
-    const url = `http://${lanIp}:${PC_AGENT_PORT}/project`;
-    let guestResp;
-    try {
-      guestResp = await axios.post(
-        url,
-        {
-          screenshot,
-          sender_hostname: sender_hostname || 'browser-host',
-          timestamp: timestamp || new Date().toISOString(),
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            'Content-Type': 'application/json',
-          },
-          timeout: 15000,
-          validateStatus: () => true,
-        },
-      );
-    } catch (e) {
-      const msg =
-        e.code === 'ECONNREFUSED'
-          ? `Nothing listening on ${lanIp}:${PC_AGENT_PORT} — run the Python PC agent on the guest.`
-          : e.message || 'Forward failed';
-      return res.status(502).json({ success: false, error: msg });
-    }
-
-    if (guestResp.status !== 200) {
-      const detail =
-        typeof guestResp.data === 'object' && guestResp.data?.error
-          ? guestResp.data.error
-          : guestResp.statusText || String(guestResp.status);
-      return res.status(502).json({
-        success: false,
-        error: `Guest agent HTTP ${guestResp.status}: ${detail}`,
-      });
-    }
-
-    return res.json({
-      success: true,
-      resolvedComputerId: targetId,
-      resolutionStrategy: strategy,
-      forwardedTo: url,
+    io.to(`computer_${targetId}`).emit('projection_frame', {
+      screenshot,
+      sender_hostname: sender_hostname || 'browser-host',
+      timestamp: timestamp || new Date().toISOString(),
     });
+
+    return res.json({ success: true, resolvedComputerId: targetId, resolutionStrategy: strategy });
   } catch (error) {
     console.error('[agents/projection/frame]', error);
     res.status(500).json({ success: false, error: 'Projection forward failed' });
   }
 });
 
-/** Ask guest Flask agent to open projection window immediately. */
+/** Open projection viewer on guest via Socket.IO agent command. */
 router.post('/projection/open', authenticateToken, async (req, res) => {
   try {
-    const apiKey = getPcAgentApiKey();
-    if (!apiKey) {
-      return res.status(503).json({
-        success: false,
-        error:
-          `Python agent API key not configured. Set PC_AGENT_API_KEY in server/.env, ` +
-            `or PC_AGENT_CONFIG_PATH to agent_config.json, or place agent_config.json at ${getPcAgentConfigPathTried()} ` +
-            `(api_key must match the guest PC Python agent).`,
-      });
-    }
+    const io = req.app.get('io');
     const connectedComputers = req.app.get('connectedComputers');
     const { computerId, ip, mac } = req.body || {};
     const { targetId, strategy } = pickAgentTargetId(connectedComputers, { computerId, ip, mac });
     if (!targetId) {
       return res.status(404).json({ success: false, error: 'No online agent matches this PC.' });
     }
-    const lanIp = resolveLanIpForPcAgent(connectedComputers, targetId, ip);
-    if (!lanIp) {
-      return res.status(400).json({ success: false, error: 'Could not resolve LAN IP for the guest agent.' });
-    }
 
-    const url = `http://${lanIp}:${PC_AGENT_PORT}/project_open`;
-    let guestResp;
-    try {
-      guestResp = await axios.post(
-        url,
-        {},
-        {
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            'Content-Type': 'application/json',
-          },
-          timeout: 10000,
-          validateStatus: () => true,
-        },
-      );
-    } catch (e) {
-      const msg =
-        e.code === 'ECONNREFUSED'
-          ? `Nothing listening on ${lanIp}:${PC_AGENT_PORT} — run the Python PC agent on the guest.`
-          : e.message || 'Projection open failed';
-      return res.status(502).json({ success: false, error: msg });
-    }
-
-    if (guestResp.status !== 200) {
-      const detail =
-        typeof guestResp.data === 'object' && guestResp.data?.error
-          ? guestResp.data.error
-          : guestResp.statusText || String(guestResp.status);
-      return res.status(502).json({ success: false, error: `Guest agent HTTP ${guestResp.status}: ${detail}` });
-    }
-
-    return res.json({
-      success: true,
-      resolvedComputerId: targetId,
-      resolutionStrategy: strategy,
-      forwardedTo: url,
+    io.to(`computer_${targetId}`).emit('execute_command', {
+      action: 'projection_start',
+      params: {},
+      from: req.user.id,
+      timestamp: new Date(),
     });
+
+    return res.json({ success: true, resolvedComputerId: targetId, resolutionStrategy: strategy });
   } catch (error) {
     console.error('[agents/projection/open]', error);
     res.status(500).json({ success: false, error: 'Projection open failed' });
@@ -669,85 +567,34 @@ router.post('/projection/request', authenticateToken, async (req, res) => {
   }
 });
 
-/** Ask guest Flask agent to close fullscreen projection. */
+/** Stop projection viewer on guest via Socket.IO agent command. */
 router.post('/projection/stop', authenticateToken, async (req, res) => {
   try {
-    const apiKey = getPcAgentApiKey();
-    if (!apiKey) {
-      return res.status(503).json({
-        success: false,
-        error:
-          `Python agent API key not configured. Set PC_AGENT_API_KEY or sync agent_config.json (see ${getPcAgentConfigPathTried()}).`,
-      });
-    }
-
+    const io = req.app.get('io');
     const connectedComputers = req.app.get('connectedComputers');
     const { computerId, ip, mac } = req.body || {};
 
-    const { targetId, strategy } = pickAgentTargetId(connectedComputers, {
-      computerId,
-      ip,
-      mac,
-    });
+    const { targetId, strategy } = pickAgentTargetId(connectedComputers, { computerId, ip, mac });
 
     if (!targetId) {
-      return res.status(404).json({
-        success: false,
-        error: 'No online agent matches this PC.',
-      });
+      return res.status(404).json({ success: false, error: 'No online agent matches this PC.' });
     }
 
-    const lanIp = resolveLanIpForPcAgent(connectedComputers, targetId, ip);
-    if (!lanIp) {
-      return res.status(400).json({
-        success: false,
-        error: 'Could not resolve LAN IP for the guest agent.',
-      });
-    }
+    io.to(`computer_${targetId}`).emit('execute_command', {
+      action: 'projection_stop',
+      params: {},
+      from: req.user.id,
+      timestamp: new Date(),
+    });
 
-    const url = `http://${lanIp}:${PC_AGENT_PORT}/stop_projection`;
-    try {
-      const guestResp = await axios.post(
-        url,
-        {},
-        {
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            'Content-Type': 'application/json',
-          },
-          timeout: 10000,
-          validateStatus: () => true,
-        },
-      );
-      if (guestResp.status !== 200) {
-        const detail =
-          typeof guestResp.data === 'object' && guestResp.data?.error
-            ? guestResp.data.error
-            : guestResp.statusText || String(guestResp.status);
-        return res.status(502).json({
-          success: false,
-          error: `Guest agent HTTP ${guestResp.status}: ${detail}`,
-        });
-      }
-      await recordActivity(prisma, {
-        userId: req.user.id,
-        action: 'SCREEN_PROJECTION_STOP',
-        description: `Stopped screen projection to computer ${targetId} (${lanIp})`,
-        ipAddress: clientIp(req),
-      });
-      return res.json({
-        success: true,
-        resolvedComputerId: targetId,
-        resolutionStrategy: strategy,
-        forwardedTo: url,
-      });
-    } catch (e) {
-      const msg =
-        e.code === 'ECONNREFUSED'
-          ? `Nothing listening on ${lanIp}:${PC_AGENT_PORT}`
-          : e.message || 'Forward failed';
-      return res.status(502).json({ success: false, error: msg });
-    }
+    await recordActivity(prisma, {
+      userId: req.user.id,
+      action: 'SCREEN_PROJECTION_STOP',
+      description: `Stopped screen projection to computer ${targetId}`,
+      ipAddress: clientIp(req),
+    });
+
+    return res.json({ success: true, resolvedComputerId: targetId, resolutionStrategy: strategy });
   } catch (error) {
     console.error('[agents/projection/stop]', error);
     res.status(500).json({ success: false, error: 'Stop projection failed' });
