@@ -248,6 +248,15 @@ def main():
     parser.add_argument("--watchdog", type=float, default=8.0, help="stale-heartbeat timeout (s)")
     parser.add_argument("--session", default="", help="session id (informational)")
     parser.add_argument(
+        "--stats",
+        default="",
+        help=(
+            "path to a JSON stats file refreshed ~1/s with decode/paint counters. "
+            "The Node agent reads it to surface per-hop FPS to the dashboard "
+            "(Phase 1 diagnostics). Robust under pythonw.exe where stderr is None."
+        ),
+    )
+    parser.add_argument(
         "--placeholder",
         default="Instructor is presenting…",
         help="text shown until the first frame arrives",
@@ -345,7 +354,17 @@ def main():
     )
     label.pack(fill=tk.BOTH, expand=True)
 
-    state = {"running": True, "last_mtime": 0.0, "photo": None, "got_frame": False}
+    state = {
+        "running": True,
+        "last_mtime": 0.0,
+        "photo": None,
+        "got_frame": False,
+        # Phase 1 diagnostics counters (monotonic since start). The agent samples
+        # these from the --stats file once a second and derives decode/paint FPS.
+        "decoded": 0,
+        "painted": 0,
+        "last_wh": None,
+    }
 
     def shutdown(reason=""):
         if not state["running"]:
@@ -409,9 +428,11 @@ def main():
                     data = f.read()
                 if data:
                     img = Image.open(io.BytesIO(data)).convert("RGB")
+                    iw, ih = img.size
+                    state["decoded"] += 1
+                    state["last_wh"] = (iw, ih)
                     cw = max(1, root.winfo_width())
                     ch = max(1, root.winfo_height())
-                    iw, ih = img.size
                     scale = min(cw / iw, ch / ih)
                     nw, nh = max(1, int(iw * scale)), max(1, int(ih * scale))
                     img = img.resize((nw, nh), Image.Resampling.LANCZOS)
@@ -420,6 +441,7 @@ def main():
                     photo = ImageTk.PhotoImage(canvas)
                     state["photo"] = photo  # keep a ref
                     label.config(image=photo, text="")
+                    state["painted"] += 1
                     if not state["got_frame"]:
                         log.info("first frame decoded (%dx%d)", iw, ih)
                     state["got_frame"] = True
@@ -433,8 +455,37 @@ def main():
                 log.warning("frame decode/render failed (skipping bad frames): %s", e)
         root.after(60, render_frame)
 
+    # Phase 1 diagnostics: publish decode/paint counters to the --stats file so the
+    # Node agent can surface real overlay FPS to the dashboard. The agent samples the
+    # monotonic counters once a second and computes the rate; we just keep them fresh.
+    # File-based (not stderr) so it works under pythonw.exe, where sys.stderr is None.
+    def write_stats():
+        if not state["running"]:
+            return
+        if args.stats:
+            payload = (
+                '{"ts":%d,"decoded":%d,"painted":%d,"got_frame":%s,"w":%s,"h":%s}'
+                % (
+                    int(time.time() * 1000),
+                    state["decoded"],
+                    state["painted"],
+                    "true" if state["got_frame"] else "false",
+                    state["last_wh"][0] if state["last_wh"] else "null",
+                    state["last_wh"][1] if state["last_wh"] else "null",
+                )
+            )
+            try:
+                tmp = args.stats + ".tmp"
+                with open(tmp, "w") as f:
+                    f.write(payload)
+                os.replace(tmp, args.stats)
+            except OSError:
+                pass  # transient FS error — next tick retries
+        root.after(1000, write_stats)
+
     root.after(100, reassert_topmost)
     root.after(100, render_frame)
+    root.after(1000, write_stats)
     if selftest:
         # Diagnostics dry-run: skip the heartbeat watchdog and auto-close.
         label.config(text="DYCI overlay self-test OK — closing…")

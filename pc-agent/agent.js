@@ -18,6 +18,9 @@ const util = require('util');
 const PROJECTION_FRAME_PATH = path.join(os.tmpdir(), 'dyci_projection_frame.jpg');
 const PROJECTION_FRAME_TMP  = PROJECTION_FRAME_PATH + '.tmp';
 const PROJECTION_HEARTBEAT_PATH = path.join(os.tmpdir(), 'dyci_projection.alive');
+// Phase 1 diagnostics: the overlay process writes decode/paint counters here as
+// JSON ~1/s; the agent samples it to report real overlay FPS to the dashboard.
+const PROJECTION_STATS_PATH = path.join(os.tmpdir(), 'dyci_projection_overlay.stats');
 
 const projection = {
   active: false,
@@ -32,6 +35,13 @@ const projection = {
   stopping: false,
   relaunchCount: 0,
   lastSpawnAt: 0,
+  // Phase 1 diagnostics: monotonic counters + a 1s sampler that emits
+  // `projection_stats` so the dashboard can see exactly which hop drops to 0 fps.
+  framesRecv: 0,          // projection_frame events received over Socket.IO
+  framesWritten: 0,       // frames successfully written to the overlay frame file
+  lastFrameBytes: 0,      // decoded byte size of the most recent frame
+  statsTimer: null,
+  _sample: null,          // { ts, framesRecv, framesWritten, overlayDecoded, overlayPainted }
 };
 
 // Resolved once: the Python launcher on the guest that can actually run the
@@ -473,11 +483,14 @@ async function connect() {
         const { session_id, seq, screenshot } = data || {};
         if (!projection.active || session_id !== projection.sessionId) return;
         if (!screenshot || typeof screenshot !== 'string') return;
+        projection.framesRecv += 1; // count BEFORE the stale/seq filter so the dashboard distinguishes "arriving but dropped" from "not arriving"
         if (typeof seq === 'number' && seq <= projection.lastSeq) return; // drop stale/out-of-order
         if (typeof seq === 'number') projection.lastSeq = seq;
         const buf = Buffer.from(screenshot, 'base64');
         await fs.writeFile(PROJECTION_FRAME_TMP, buf);
         await fs.rename(PROJECTION_FRAME_TMP, PROJECTION_FRAME_PATH);
+        projection.framesWritten += 1;
+        projection.lastFrameBytes = buf.length;
         await touchProjectionHeartbeat();
       } catch (err) {
         console.error('[Projection] Frame write error:', err.message);
@@ -898,11 +911,92 @@ async function touchProjectionHeartbeat() {
   }
 }
 
+/** Read the overlay's stats file (decode/paint counters). Returns null if absent/unparseable. */
+function readOverlayStats() {
+  try {
+    const raw = fsSync.readFileSync(PROJECTION_STATS_PATH, 'utf8');
+    const o = JSON.parse(raw);
+    return {
+      decoded: Number(o.decoded) || 0,
+      painted: Number(o.painted) || 0,
+      gotFrame: !!o.got_frame,
+      w: o.w ?? null,
+      h: o.h ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Phase 1 diagnostics: once a second, derive per-hop FPS from the monotonic
+ * counters (agent recv/write + overlay decode/paint) and emit `projection_stats`
+ * so the dashboard can pinpoint the hop where frames stop flowing.
+ */
+function startProjectionStats() {
+  stopProjectionStats();
+  projection._sample = {
+    ts: Date.now(),
+    framesRecv: projection.framesRecv,
+    framesWritten: projection.framesWritten,
+    overlayDecoded: 0,
+    overlayPainted: 0,
+  };
+  projection.statsTimer = setInterval(() => {
+    if (!projection.active || !socket || !socket.connected) return;
+    const now = Date.now();
+    const prev = projection._sample;
+    const dt = Math.max(0.001, (now - prev.ts) / 1000);
+    const ov = readOverlayStats();
+    const recvFps = (projection.framesRecv - prev.framesRecv) / dt;
+    const writeFps = (projection.framesWritten - prev.framesWritten) / dt;
+    const decodedFps = ov ? (ov.decoded - prev.overlayDecoded) / dt : 0;
+    const paintedFps = ov ? (ov.painted - prev.overlayPainted) / dt : 0;
+    projection._sample = {
+      ts: now,
+      framesRecv: projection.framesRecv,
+      framesWritten: projection.framesWritten,
+      overlayDecoded: ov ? ov.decoded : prev.overlayDecoded,
+      overlayPainted: ov ? ov.painted : prev.overlayPainted,
+    };
+    const stats = {
+      recvFps: Math.round(recvFps * 10) / 10,
+      writeFps: Math.round(writeFps * 10) / 10,
+      lastBytes: projection.lastFrameBytes,
+      overlayUp: !!projection.overlayProc,
+      overlay: ov
+        ? {
+            decodedFps: Math.round(decodedFps * 10) / 10,
+            paintedFps: Math.round(paintedFps * 10) / 10,
+            gotFrame: ov.gotFrame,
+            w: ov.w,
+            h: ov.h,
+          }
+        : null,
+    };
+    pdlog(
+      `[Projection] stats recv=${stats.recvFps}fps write=${stats.writeFps}fps ` +
+        `overlay=${ov ? `${stats.overlay.decodedFps}/${stats.overlay.paintedFps}fps got=${ov.gotFrame}` : 'no-stats-file'} ` +
+        `bytes=${stats.lastBytes}`,
+    );
+    socket.emit('projection_stats', { session_id: projection.sessionId, ...stats });
+  }, 1000);
+}
+
+function stopProjectionStats() {
+  if (projection.statsTimer) {
+    clearInterval(projection.statsTimer);
+    projection.statsTimer = null;
+  }
+  projection._sample = null;
+}
+
 /** Fatal overlay failure: report a clear error to the dashboard and restore the guest. */
 function onOverlayFatal(detail) {
   console.error('[Projection] FATAL:', detail);
   projection.stopping = true;
   projection.active = false;
+  stopProjectionStats();
   if (projection.watchdogTimer) {
     clearInterval(projection.watchdogTimer);
     projection.watchdogTimer = null;
@@ -912,6 +1006,7 @@ function onOverlayFatal(detail) {
   if (proc) { try { proc.kill(); } catch { /* ignore */ } }
   fs.unlink(PROJECTION_HEARTBEAT_PATH).catch(() => {});
   fs.unlink(PROJECTION_FRAME_PATH).catch(() => {});
+  fs.unlink(PROJECTION_STATS_PATH).catch(() => {});
   // Leave the dashboard showing the error reason (no follow-up 'stopped' ack).
   sendProjectionAck('error', detail);
   projection.sessionId = null;
@@ -926,6 +1021,7 @@ function spawnOverlayProc() {
     '--heartbeat', PROJECTION_HEARTBEAT_PATH,
     '--watchdog', String(projection.watchdogSeconds),
     '--session', projection.sessionId || '',
+    '--stats', PROJECTION_STATS_PATH,
   ];
   let proc;
   try {
@@ -1054,13 +1150,20 @@ async function startProjection(data) {
   projection.lastSeq = -1;
   projection.relaunchCount = 0;
   projection.watchdogSeconds = Number.isFinite(watchdog) ? watchdog : 8;
+  projection.framesRecv = 0;
+  projection.framesWritten = 0;
+  projection.lastFrameBytes = 0;
 
-  // Clear any stale frame so the overlay shows the "presenting…" placeholder first.
+  // Clear any stale frame/stats so the overlay shows the "presenting…" placeholder
+  // first and the dashboard doesn't read counters from a previous session.
   try { await fs.unlink(PROJECTION_FRAME_PATH); } catch { /* ignore */ }
+  try { await fs.unlink(PROJECTION_STATS_PATH); } catch { /* ignore */ }
   await touchProjectionHeartbeat();
 
   spawnOverlayProc();
   if (!projection.active) return; // spawn failed → onOverlayFatal already reported
+
+  startProjectionStats();
 
   // Node-side watchdog: if no frame/ping arrives within the window, fail open.
   if (projection.watchdogTimer) clearInterval(projection.watchdogTimer);
@@ -1085,6 +1188,7 @@ async function stopProjection(reason) {
   projection.stopping = true;
   projection.active = false;
 
+  stopProjectionStats();
   if (projection.watchdogTimer) {
     clearInterval(projection.watchdogTimer);
     projection.watchdogTimer = null;
@@ -1110,6 +1214,7 @@ async function stopProjection(reason) {
 
   try { await fs.unlink(PROJECTION_FRAME_PATH); } catch { /* ignore */ }
   try { await fs.unlink(PROJECTION_FRAME_TMP);  } catch { /* ignore */ }
+  try { await fs.unlink(PROJECTION_STATS_PATH); } catch { /* ignore */ }
 
   pdlog(`[Projection] Stopped (${reason || 'stop'})`);
   sendProjectionAck('stopped', reason || null);

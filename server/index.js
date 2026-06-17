@@ -34,6 +34,12 @@ const io = new Server(httpServer, {
     },
     credentials: true,
   },
+  // Locked Demo Mode pushes base64 JPEG screen frames over Socket.IO. A single
+  // frame at high max-width/quality (e.g. a busy 4K screen) can exceed the 1MB
+  // engine.io default, which would silently CLOSE the host (or guest) connection
+  // mid-session — looking exactly like "handshake OK but no frames render". Raise
+  // the cap so large frames flow; still bounded to avoid unbounded memory use.
+  maxHttpBufferSize: 16e6, // 16 MB
 });
 
 const prisma = new PrismaClient();
@@ -213,6 +219,11 @@ io.on("connection", (socket) => {
     socket.on("projection_pong", (data) => {
       const { session_id } = data || {};
       projectionManager.pong({ socketId: socket.id, sessionId: session_id });
+    });
+    // PC Agent: per-hop FPS diagnostics (recv/write/overlay) — Phase 1 instrumentation.
+    socket.on("projection_stats", (data) => {
+      const { session_id, ...stats } = data || {};
+      projectionManager.recordGuestStats({ socketId: socket.id, sessionId: session_id, stats });
     });
 
     // PC Agent: Handle status updates

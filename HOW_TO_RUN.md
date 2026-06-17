@@ -254,6 +254,34 @@ Because the macOS host can't see the Windows guest's screen, two tools report gu
 > restart both agents on the guest. Set `PROJECTION_DEBUG=true` (server env or
 > `agent.config.json`) for verbose per-hop projection logging while diagnosing.
 
+### Per-hop frame-flow diagnostics ("overlay is up but nothing renders")
+
+While a projection is live, **Developer Mode** shows a live **Frame flow** readout so you
+can see exactly which hop drops to 0 fps. The four hops, in order:
+
+```
+① Browser emit   →  ② Server recv/relay  →  ③ Agent recv/write  →  ④ Overlay decode/paint
+(this browser)      (Socket.IO session)     (guest Node agent)     (guest Python overlay)
+```
+
+- **① and ② shown at the top of the panel; ③ and ④ on each PC row** (`③ recv/write · ④ decode/paint`).
+- Read it left-to-right and find the **first hop that sits near 0 while the one before it is healthy** — that hop is the bug:
+
+| First hop at ~0 | Likely cause |
+|---|---|
+| ① Browser emit | Capture loop not running / screen-share ended / tab throttled. Re-pick the share. |
+| ② Server recv | Frames not reaching the server — host socket dropped, or a frame exceeded the Socket.IO buffer (now 16 MB). |
+| ② relay (recv OK) | No online guest in `projecting`/`connecting` state to relay to. |
+| ③ Agent recv | Server relaying but the guest agent isn't receiving — wrong room / agent reconnecting / client buffer. |
+| ③ write (recv OK) | Agent receiving but failing to write the frame file (disk/temp permission) — check the agent console. |
+| ④ `no overlay stats` | Overlay process not writing its stats file — overlay crashed/relaunching; fetch the **Overlay log**. |
+| ④ decode = 0 (write OK) | Overlay reads the file but **can't decode** it (bad/garbled JPEG) — overlay log shows `frame decode/render failed`. |
+| ④ paint < decode | Decoding but not painting (window not sized/mapped) — rare; usually self-corrects. |
+
+The agent reports ③/④ over a `projection_stats` Socket.IO event each second (overlay
+counters come from `%TEMP%\dyci_projection_overlay.stats`). Enable `PROJECTION_DEBUG=true`
+to also log these counts in the server and agent consoles.
+
 ## Features
 
 - **User Management**: Admin, Instructor, and Student roles

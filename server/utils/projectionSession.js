@@ -87,6 +87,7 @@ class ProjectionSessionManager {
         fps: s.fps,
         quality: s.quality,
         maxWidth: s.maxWidth,
+        host: s.stats || null, // host→server→relay FPS (Phase 1 diagnostics)
         perGuest: this._perGuest(),
       },
     };
@@ -102,6 +103,7 @@ class ProjectionSessionManager {
       name: t.name || null,
       state: t.state,
       detail: t.detail || null,
+      stats: t.agentStats || null, // per-hop FPS the guest agent reports (Phase 1 diagnostics)
     }));
   }
 
@@ -180,7 +182,17 @@ class ProjectionSessionManager {
       maxWidth,
       lastSeq: 0,
       targets: targetMap,
+      // Phase 1 diagnostics: monotonic counters sampled once a second into
+      // `stats` so the dashboard sees host→server→relay FPS alongside the
+      // agent/overlay FPS each guest reports via `projection_stats`.
+      hostFrameCount: 0,
+      hostByteCount: 0,
+      relayCount: 0,
+      statsSampler: null,
+      _statsSample: { ts: Date.now(), hostFrameCount: 0, hostByteCount: 0, relayCount: 0 },
+      stats: { hostFps: 0, hostKbps: 0, relayFps: 0 },
     };
+    this._startStatsSampler();
 
     const onlineCount = [...targetMap.values()].filter((t) => t.state === GUEST.CONNECTING).length;
     dlog(
@@ -229,6 +241,8 @@ class ProjectionSessionManager {
     } else {
       safeSeq = ++s.lastSeq;
     }
+    s.hostFrameCount += 1;
+    s.hostByteCount += screenshot.length;
     for (const t of s.targets.values()) {
       if (t.state === GUEST.CONNECTING || t.state === GUEST.PROJECTING) {
         this.io.to(`computer_${t.id}`).emit("projection_frame", {
@@ -239,6 +253,7 @@ class ProjectionSessionManager {
           format: "jpeg",
           screenshot,
         });
+        s.relayCount += 1;
       }
     }
     return { ok: true };
@@ -288,6 +303,66 @@ class ProjectionSessionManager {
     if (t) t.lastPong = Date.now();
   }
 
+  /** Guest agent → server per-hop stats (recv/write/overlay FPS). Stored per target. */
+  recordGuestStats({ socketId, sessionId, stats }) {
+    const s = this.session;
+    if (!s || (sessionId && s.sessionId !== sessionId)) return;
+    const id = this._computerIdForSocket(socketId);
+    if (!id) return;
+    const t = s.targets.get(id);
+    if (!t) return;
+    t.agentStats = {
+      recvFps: stats?.recvFps ?? null,
+      writeFps: stats?.writeFps ?? null,
+      lastBytes: stats?.lastBytes ?? null,
+      overlayUp: stats?.overlayUp ?? null,
+      overlay: stats?.overlay ?? null,
+      at: Date.now(),
+    };
+    // Pushed on the next 1s sampler tick (avoids a status emit per guest per second).
+  }
+
+  /** Sample host→server→relay counters once a second and push status to the host. */
+  _startStatsSampler() {
+    this._stopStatsSampler();
+    const s = this.session;
+    if (!s) return;
+    s.statsSampler = setInterval(() => {
+      const sess = this.session;
+      if (!sess) return;
+      const now = Date.now();
+      const prev = sess._statsSample;
+      const dt = Math.max(0.001, (now - prev.ts) / 1000);
+      const hostFps = (sess.hostFrameCount - prev.hostFrameCount) / dt;
+      const relayFps = (sess.relayCount - prev.relayCount) / dt;
+      const hostKbps = ((sess.hostByteCount - prev.hostByteCount) / dt) / 1024;
+      sess.stats = {
+        hostFps: Math.round(hostFps * 10) / 10,
+        relayFps: Math.round(relayFps * 10) / 10,
+        hostKbps: Math.round(hostKbps),
+      };
+      sess._statsSample = {
+        ts: now,
+        hostFrameCount: sess.hostFrameCount,
+        hostByteCount: sess.hostByteCount,
+        relayCount: sess.relayCount,
+      };
+      dlog(
+        `[Projection] stats host=${sess.stats.hostFps}fps relay=${sess.stats.relayFps}fps ${sess.stats.hostKbps}KB/s`,
+      );
+      this._emitStatus();
+    }, 1000);
+    if (typeof s.statsSampler.unref === "function") s.statsSampler.unref();
+  }
+
+  _stopStatsSampler() {
+    const s = this.session;
+    if (s && s.statsSampler) {
+      clearInterval(s.statsSampler);
+      s.statsSampler = null;
+    }
+  }
+
   _computerIdForSocket(socketId) {
     if (!socketId || !this.connectedComputers) return null;
     for (const [id, c] of this.connectedComputers.entries()) {
@@ -314,6 +389,7 @@ class ProjectionSessionManager {
     }
     const stopped = { ok: true, sessionId: s.sessionId, reason: reason || "host_stop" };
     // Final status push, then clear.
+    this._stopStatsSampler();
     this._emitStatus();
     this.session = null;
     return stopped;
@@ -361,6 +437,7 @@ class ProjectionSessionManager {
     const payload = {
       session_id: this.session.sessionId,
       perGuest: this._perGuest(),
+      host: this.session.stats || null, // host→server→relay FPS (Phase 1 diagnostics)
       config: {
         fps: this.session.fps,
         quality: this.session.quality,

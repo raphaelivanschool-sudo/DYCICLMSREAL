@@ -106,12 +106,16 @@ function DeveloperModePage() {
   const [projQuality, setProjQuality] = useState(PROJECTION_DEFAULTS.quality);
   const [projMaxWidth, setProjMaxWidth] = useState(PROJECTION_DEFAULTS.maxWidth);
   const [selfPreviewUrl, setSelfPreviewUrl] = useState('');
+  const [hostEmitStats, setHostEmitStats] = useState(null); // { fps, kbps } emitted by this browser (Phase 1 diagnostics)
   const projectionRunningRef = useRef(false);
   const projectionSessionIdRef = useRef(null);
   const projectionFrameTimerRef = useRef(null);
   const projectionPingTimerRef = useRef(null);
+  const projectionStatsTimerRef = useRef(null);
   const projectionStreamRef = useRef(null);
   const projectionSeqRef = useRef(0);
+  const projectionEmitCountRef = useRef(0); // frames emitted since last 1s sample
+  const projectionEmitBytesRef = useRef(0); // base64 bytes emitted since last 1s sample
   const projectionActive = projectionSession != null;
   const selectedAgentIdRef = useRef(null);
   const commandTargetComputerIdRef = useRef(null);
@@ -423,6 +427,13 @@ function DeveloperModePage() {
       window.clearInterval(projectionPingTimerRef.current);
       projectionPingTimerRef.current = null;
     }
+    if (projectionStatsTimerRef.current != null) {
+      window.clearInterval(projectionStatsTimerRef.current);
+      projectionStatsTimerRef.current = null;
+    }
+    projectionEmitCountRef.current = 0;
+    projectionEmitBytesRef.current = 0;
+    setHostEmitStats(null);
     const pack = projectionStreamRef.current;
     projectionStreamRef.current = null;
     if (pack?.stream) pack.stream.getTracks().forEach((t) => t.stop());
@@ -518,6 +529,8 @@ function DeveloperModePage() {
             const b64 = await blobToBase64(blob);
             const seq = (projectionSeqRef.current += 1);
             socketService.sendProjectionFrame({ session_id: sid, seq, w: tw, h: th, screenshot: b64 });
+            projectionEmitCountRef.current += 1;
+            projectionEmitBytesRef.current += b64.length;
             if (seq % PROJECTION_PREVIEW_EVERY === 0) {
               const url = URL.createObjectURL(blob);
               setSelfPreviewUrl((prev) => {
@@ -538,6 +551,20 @@ function DeveloperModePage() {
           const sid = projectionSessionIdRef.current;
           if (sid) socketService.sendProjectionPing({ session_id: sid, ts: Date.now() });
         }, PROJECTION_PING_MS);
+        // Phase 1 diagnostics: sample this browser's actual emit rate once a second.
+        // This is hop #1 — if it sits near projFps the host IS sending continuously.
+        let lastSampleTs = Date.now();
+        projectionStatsTimerRef.current = window.setInterval(() => {
+          const now = Date.now();
+          const dt = Math.max(0.001, (now - lastSampleTs) / 1000);
+          lastSampleTs = now;
+          const fps = Math.round((projectionEmitCountRef.current / dt) * 10) / 10;
+          const kbps = Math.round(projectionEmitBytesRef.current / dt / 1024);
+          projectionEmitCountRef.current = 0;
+          projectionEmitBytesRef.current = 0;
+          setHostEmitStats({ fps, kbps });
+          console.log(`[Projection] host emit ${fps} fps, ${kbps} KB/s`);
+        }, 1000);
         sendFrame();
       };
 
@@ -574,6 +601,7 @@ function DeveloperModePage() {
           ...prev,
           perGuest: data.perGuest || prev.perGuest,
           config: data.config || prev.config,
+          host: data.host || prev.host, // server-side recv/relay FPS (Phase 1 diagnostics)
         };
       });
     });
@@ -969,6 +997,29 @@ function DeveloperModePage() {
               {projectionStatus}
             </p>
           )}
+          {projectionActive && (
+            <div className="mt-2 rounded-md border border-violet-200 bg-violet-50 px-3 py-2 text-xs text-violet-900">
+              <div className="font-medium mb-1">Frame flow (find the hop that drops to 0):</div>
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <span className="font-mono">
+                  ① Browser emit:{' '}
+                  <b>{hostEmitStats ? `${hostEmitStats.fps} fps` : '…'}</b>
+                  {hostEmitStats ? ` (${hostEmitStats.kbps} KB/s)` : ''}
+                </span>
+                <span className="text-violet-400">→</span>
+                <span className="font-mono">
+                  ② Server: recv <b>{projectionSession?.host?.hostFps ?? '…'}</b> / relay{' '}
+                  <b>{projectionSession?.host?.relayFps ?? '…'}</b> fps
+                </span>
+                <span className="text-violet-400">→</span>
+                <span className="font-mono">③④ per-PC below ↓</span>
+              </div>
+              <div className="mt-1 text-[11px] text-violet-700">
+                Each PC row shows ③ agent recv/write and ④ overlay decode/paint fps. The first
+                hop reading ~0 while the one before it is healthy is the bug.
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="overflow-x-auto">
@@ -1036,14 +1087,27 @@ function DeveloperModePage() {
                       {(() => {
                         const g = device.agentId ? guestStateById[device.agentId] : null;
                         if (!g) return <span className="text-xs text-gray-400">—</span>;
+                        const st = g.stats;
+                        const ov = st?.overlay;
                         return (
-                          <span
-                            className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${GUEST_STATE_STYLES[g.state] || 'bg-gray-100 text-gray-600'}`}
-                            title={g.detail || ''}
-                          >
-                            {g.state}
-                            {g.state === 'error' && g.detail ? `: ${g.detail}` : ''}
-                          </span>
+                          <div className="flex flex-col gap-1">
+                            <span
+                              className={`inline-block w-fit rounded-full px-2 py-0.5 text-xs font-medium ${GUEST_STATE_STYLES[g.state] || 'bg-gray-100 text-gray-600'}`}
+                              title={g.detail || ''}
+                            >
+                              {g.state}
+                              {g.state === 'error' && g.detail ? `: ${g.detail}` : ''}
+                            </span>
+                            {st && (g.state === 'projecting' || g.state === 'connecting') && (
+                              <span
+                                className="font-mono text-[11px] text-gray-500"
+                                title="③ agent recv/write fps · ④ overlay decode/paint fps"
+                              >
+                                ③ {st.recvFps ?? '–'}/{st.writeFps ?? '–'} · ④{' '}
+                                {ov ? `${ov.decodedFps ?? '–'}/${ov.paintedFps ?? '–'}` : 'no overlay stats'}
+                              </span>
+                            )}
+                          </div>
                         );
                       })()}
                     </td>
