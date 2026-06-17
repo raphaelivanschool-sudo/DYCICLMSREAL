@@ -23,6 +23,13 @@ function clampInt(raw, min, max, fallback) {
 
 const ROLE_ALLOWED = new Set(["ADMIN", "INSTRUCTOR"]);
 
+// Verbose per-hop projection logging — gated so it isn't noisy in normal runs.
+// Enable with PROJECTION_DEBUG=true in server/.env.
+const DEBUG = String(process.env.PROJECTION_DEBUG || "").toLowerCase() === "true";
+const dlog = (...args) => {
+  if (DEBUG) console.log(...args);
+};
+
 // Tunables (env overrides; safe defaults for a lab LAN).
 const DEFAULTS = Object.freeze({
   fps: clampInt(process.env.PROJECTION_FPS, 5, 20, 12),
@@ -176,7 +183,7 @@ class ProjectionSessionManager {
     };
 
     const onlineCount = [...targetMap.values()].filter((t) => t.state === GUEST.CONNECTING).length;
-    console.log(
+    dlog(
       `[Projection] start session=${sessionId} host=${host.userId} ` +
         `targets=${targets === "all" ? "all" : "selected"} online=${onlineCount}/${targetMap.size}`,
     );
@@ -198,7 +205,7 @@ class ProjectionSessionManager {
   _sendStart(computerId) {
     if (!this.session) return;
     const s = this.session;
-    console.log(`[Projection] -> projection_start to computer_${computerId} (session ${s.sessionId})`);
+    dlog(`[Projection] -> projection_start to computer_${computerId} (session ${s.sessionId})`);
     this.io.to(`computer_${computerId}`).emit("projection_start", {
       session_id: s.sessionId,
       fps: s.fps,
@@ -260,7 +267,7 @@ class ProjectionSessionManager {
     if (!id) return;
     const t = s.targets.get(id);
     if (!t) return;
-    console.log(`[Projection] <- ack from computer_${id}: ${state}${detail ? ` (${detail})` : ""}`);
+    dlog(`[Projection] <- ack from computer_${id}: ${state}${detail ? ` (${detail})` : ""}`);
     if (state === "projecting") t.state = GUEST.PROJECTING;
     else if (state === "stopped") t.state = GUEST.STOPPED;
     else if (state === "error") {

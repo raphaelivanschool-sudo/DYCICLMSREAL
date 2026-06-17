@@ -142,22 +142,31 @@ class NetworkScanner {
     }
   }
 
-  // Ping a specific IP (optimized version)
+  // Ping a specific IP (cross-OS: the server host may be macOS, Linux, or Windows)
   async pingHost(ip) {
     return new Promise((resolve) => {
       const startTime = Date.now();
-      
-      // Use Windows ping command with optimized parameters
-      const ping = spawn('ping', ['-n', '1', '-w', '500', ip]);
-      
+
+      // OS-appropriate single ping with a ~1s timeout. Using Windows-only flags
+      // ('-n','-w') on a macOS/Linux host makes ping error out and silently
+      // report every host offline — which is exactly the cross-OS trap here.
+      const plat = process.platform;
+      const args =
+        plat === 'win32'
+          ? ['-n', '1', '-w', '800', ip]
+          : plat === 'darwin'
+            ? ['-c', '1', '-t', '1', ip]
+            : ['-c', '1', '-W', '1', ip]; // linux: -W = per-reply timeout (seconds)
+      const ping = spawn('ping', args);
+
       let responded = false;
-      
+
       ping.on('close', (code) => {
         const duration = Date.now() - startTime;
         if (code === 0 && responded) {
-          resolve({ 
-            ip, 
-            online: true, 
+          resolve({
+            ip,
+            online: true,
             responseTime: duration,
             hostname: null // Will be resolved separately
           });
@@ -165,18 +174,19 @@ class NetworkScanner {
           resolve(null);
         }
       });
-      
+
       ping.stdout.on('data', (data) => {
         const output = data.toString();
-        if (output.includes('Reply from')) {
+        // Windows: "Reply from x"; macOS/Linux: "64 bytes from x"
+        if (/Reply from|bytes from/i.test(output)) {
           responded = true;
         }
       });
-      
+
       ping.on('error', () => {
         resolve(null);
       });
-      
+
       // Force timeout after 1 second
       setTimeout(() => {
         if (!responded) {

@@ -194,9 +194,19 @@ def main():
         default="Instructor is presenting…",
         help="text shown until the first frame arrives",
     )
+    parser.add_argument(
+        "--selftest-seconds",
+        type=float,
+        default=0.0,
+        help="diagnostics dry-run: skip input lock + watchdog, auto-close after N seconds",
+    )
     args = parser.parse_args()
+    selftest = args.selftest_seconds and args.selftest_seconds > 0
 
-    log.info("overlay starting (session=%s, frame=%s)", args.session, args.frame)
+    log.info(
+        "overlay starting (session=%s, frame=%s, selftest=%s)",
+        args.session, args.frame, selftest,
+    )
     try:
         import tkinter as tk
         from PIL import Image, ImageTk
@@ -216,8 +226,11 @@ def main():
             except Exception:
                 pass
 
+    # In selftest (diagnostics dry-run) mode we never lock input — that would
+    # trap the person running the test. We just verify the window can be built.
     blocker = InputBlocker()
-    blocker.start()
+    if not selftest:
+        blocker.start()
 
     root = tk.Tk()
     root.title("DYCI Locked Demo Mode")
@@ -329,8 +342,13 @@ def main():
         root.after(60, render_frame)
 
     root.after(100, reassert_topmost)
-    root.after(500, check_watchdog)
     root.after(100, render_frame)
+    if selftest:
+        # Diagnostics dry-run: skip the heartbeat watchdog and auto-close.
+        label.config(text="DYCI overlay self-test OK — closing…")
+        root.after(int(args.selftest_seconds * 1000), lambda: shutdown("selftest_done"))
+    else:
+        root.after(500, check_watchdog)
 
     # No escape hatch for the guest: swallow window-level key/close attempts too.
     root.protocol("WM_DELETE_WINDOW", lambda: None)

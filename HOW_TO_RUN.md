@@ -232,6 +232,28 @@ Then verify, from **Admin → Developer Mode**:
 If full input lock does not engage, confirm the agent is running **elevated**; the
 dashboard badge will read `error: SetWindowsHookEx failed …` when it is not.
 
+### Diagnosing a guest (host = macOS, guest = Windows)
+
+Because the macOS host can't see the Windows guest's screen, two tools report guest health:
+
+- **Dashboard → Developer Mode → 🩺 Diagnose guest** (per selected row): shows ✅/❌ for
+  Node agent online, Python agent reachable on 5555, api_key match, capture (mss/Pillow),
+  overlay script present, and elevation — plus plain-language errors.
+- **`scripts/guest-selftest.ps1`** — run **on the Windows guest**:
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File scripts\guest-selftest.ps1 -ExpectedApiKey "<server PC_AGENT_API_KEY>"
+  ```
+  Checks Python + deps (mss, Pillow, tkinter; pywin32 only for service mode), that the
+  agent listens on 5555, the inbound firewall rule, the api_key (masked) and whether it
+  matches, a real test capture, and an overlay dry-run (no input lock). Run as
+  Administrator to also confirm the input-lock path. Overlay crashes are logged to
+  `%TEMP%\dyci_projection_overlay.log`.
+
+> If "Refresh screenshot" still shows a `screenCapture_*.exe` error, the guest is running
+> an **old agent build** (with the removed `screenshot-desktop`). Pull the latest code and
+> restart both agents on the guest. Set `PROJECTION_DEBUG=true` (server env or
+> `agent.config.json`) for verbose per-hop projection logging while diagnosing.
+
 ## Features
 
 - **User Management**: Admin, Instructor, and Student roles

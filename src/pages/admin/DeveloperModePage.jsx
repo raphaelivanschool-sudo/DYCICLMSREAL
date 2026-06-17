@@ -93,6 +93,8 @@ function DeveloperModePage() {
   const [screenshotStatus, setScreenshotStatus] = useState('');
   const [screenshotFetching, setScreenshotFetching] = useState(false);
   const [autoRefreshScreenshot, setAutoRefreshScreenshot] = useState(false);
+  const [diagnosis, setDiagnosis] = useState(null);
+  const [diagnosing, setDiagnosing] = useState(false);
   // Locked Demo Mode (host screen broadcast) state.
   const [projectionSession, setProjectionSession] = useState(null); // { sessionId, perGuest, config }
   const [projectionStatus, setProjectionStatus] = useState('');
@@ -316,6 +318,31 @@ function DeveloperModePage() {
     },
     [selectedDevice?.agentId, selectedDevice?.ip, selectedDevice?.mac]
   );
+
+  const runDiagnose = useCallback(async () => {
+    if (!selectedDevice?.ip) return;
+    setDiagnosing(true);
+    setDiagnosis(null);
+    try {
+      const res = await agentsApi.diagnoseAgent(selectedDevice.agentId, {
+        ip: selectedDevice.ip,
+        mac: selectedDevice.mac,
+      });
+      setDiagnosis(res?.data || null);
+    } catch (error) {
+      setDiagnosis({
+        success: false,
+        errors: [error.response?.data?.error || error.message || 'Diagnostics request failed'],
+      });
+    } finally {
+      setDiagnosing(false);
+    }
+  }, [selectedDevice?.agentId, selectedDevice?.ip, selectedDevice?.mac]);
+
+  // Clear stale diagnosis when switching rows.
+  useEffect(() => {
+    setDiagnosis(null);
+  }, [selectedIp]);
 
   useEffect(() => {
     if (!autoRefreshScreenshot || !selectedDevice?.ip) {
@@ -1088,8 +1115,54 @@ function DeveloperModePage() {
                 >
                   🖥️ Project to this PC
                 </button>
+                <button
+                  type="button"
+                  onClick={runDiagnose}
+                  disabled={!selectedDevice?.ip || diagnosing}
+                  title="Check the guest agent: reachability, api_key, capture + overlay deps"
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm text-gray-800 bg-gray-200 hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {diagnosing ? 'Diagnosing…' : '🩺 Diagnose guest'}
+                </button>
               </div>
             </div>
+
+            {diagnosis && (
+              <div className="rounded-lg border border-gray-300 bg-white p-4 text-sm">
+                <p className="font-semibold text-gray-900 mb-2">Guest diagnostics</p>
+                <ul className="space-y-1">
+                  {[
+                    ['Node agent online (Socket.IO)', diagnosis.nodeAgentOnline],
+                    ['Python agent reachable (5555)', diagnosis.pythonAgentReachable],
+                    ['api_key matches', diagnosis.apiKeyOk],
+                    ['Screenshot capture (mss/Pillow)', diagnosis.capture?.ok],
+                    ['Overlay script present', diagnosis.overlay?.script_present],
+                    ['Agent elevated (input lock)', diagnosis.elevated],
+                  ].map(([label, ok]) => (
+                    <li key={label} className="flex items-center gap-2">
+                      <span>{ok === true ? '✅' : ok === false ? '❌' : '➖'}</span>
+                      <span className="text-gray-700">{label}</span>
+                    </li>
+                  ))}
+                </ul>
+                {diagnosis.deps && Object.keys(diagnosis.deps).length > 0 && (
+                  <p className="mt-2 text-xs text-gray-500">
+                    deps:{' '}
+                    {Object.entries(diagnosis.deps)
+                      .map(([k, v]) => `${k}${v ? '✓' : '✗'}`)
+                      .join('  ')}
+                    {diagnosis.capture?.backend ? `   capture via ${diagnosis.capture.backend}` : ''}
+                  </p>
+                )}
+                {Array.isArray(diagnosis.errors) && diagnosis.errors.length > 0 && (
+                  <div className="mt-2 rounded border border-red-200 bg-red-50 p-2 text-xs text-red-800">
+                    {diagnosis.errors.map((e, i) => (
+                      <p key={i}>• {e}</p>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className="rounded-lg border border-gray-300 bg-[#2d2d2d] min-h-[280px] flex items-center justify-center overflow-hidden">
               {screenshotUrl ? (

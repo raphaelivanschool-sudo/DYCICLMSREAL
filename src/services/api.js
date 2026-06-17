@@ -146,6 +146,15 @@ export const agentsApi = {
     return api.post("/api/agents/screenshot", body);
   },
 
+  // Per-guest health/diagnostics (Node online, Python reachable, api_key, deps, capture, overlay).
+  diagnoseAgent: (computerId, meta = {}) => {
+    const body = {};
+    if (computerId) body.computerId = computerId;
+    if (meta.ip) body.ip = meta.ip;
+    if (meta.mac) body.mac = meta.mac;
+    return api.post("/api/agents/diagnose", body);
+  },
+
   // Generate agent installer
   createInstaller: (room, serverUrl, computerName) =>
     api.post("/api/agents/installer", { room, serverUrl, computerName }),

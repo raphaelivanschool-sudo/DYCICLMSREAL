@@ -38,6 +38,16 @@ const projection = {
 let cachedPythonCmd = null;
 let pythonProbed = false;
 
+// Verbose projection logging — gated so normal runs stay quiet. Errors always log.
+// Enable with PROJECTION_DEBUG=true (env) or "projectionDebug": true in agent.config.json.
+// (Read lazily so it can also consult fileConfig, which is defined further down.)
+const pdlog = (...args) => {
+  const on =
+    String(process.env.PROJECTION_DEBUG || '').toLowerCase() === 'true' ||
+    (typeof fileConfig === 'object' && fileConfig?.projectionDebug === true);
+  if (on) console.log(...args);
+};
+
 function normalizeServerUrl(url) {
   let s = String(url || '').trim().replace(/\/+$/, '');
   if (!s) return 'http://localhost:3001';
@@ -884,7 +894,7 @@ function spawnOverlayProc() {
   projection.overlayProc = proc;
   projection.lastSpawnAt = Date.now();
 
-  proc.on('spawn', () => console.log(`[Projection] Overlay launched via ${projection.pythonCmd} (PID ${proc.pid})`));
+  proc.on('spawn', () => pdlog(`[Projection] Overlay launched via ${projection.pythonCmd} (PID ${proc.pid})`));
   if (proc.stderr) {
     proc.stderr.on('data', (d) => {
       const line = String(d).trim();
@@ -897,7 +907,7 @@ function spawnOverlayProc() {
   });
   proc.on('exit', (code, signal) => {
     if (projection.overlayProc === proc) projection.overlayProc = null;
-    console.log(`[Projection] Overlay exited (code=${code} signal=${signal || '-'})`);
+    pdlog(`[Projection] Overlay exited (code=${code} signal=${signal || '-'})`);
     if (!projection.active || projection.stopping) return;
     // Crash-loop guard: relaunch, but give up after repeated rapid failures.
     const now = Date.now();
@@ -907,7 +917,7 @@ function spawnOverlayProc() {
       onOverlayFatal('Overlay keeps crashing on the guest. See %TEMP%\\dyci_projection_overlay.log for details (check Pillow is installed and the agent is elevated).');
       return;
     }
-    console.log('[Projection] supervisor relaunching overlay…');
+    pdlog('[Projection] supervisor relaunching overlay…');
     spawnOverlayProc();
   });
 }
@@ -916,7 +926,7 @@ function spawnOverlayProc() {
 async function startProjection(data) {
   const sessionId = data.session_id || `local-${Date.now()}`;
   const watchdog = parseInt(data.watchdog_seconds, 10);
-  console.log(`[Projection] START received (session=${sessionId})`);
+  pdlog(`[Projection] START received (session=${sessionId})`);
   // Already projecting this session → re-ack and continue (idempotent late-joiner resend).
   if (projection.active && projection.sessionId === sessionId) {
     sendProjectionAck('projecting', 'Already active');
@@ -1007,7 +1017,7 @@ async function stopProjection(reason) {
   try { await fs.unlink(PROJECTION_FRAME_PATH); } catch { /* ignore */ }
   try { await fs.unlink(PROJECTION_FRAME_TMP);  } catch { /* ignore */ }
 
-  console.log(`[Projection] Stopped (${reason || 'stop'})`);
+  pdlog(`[Projection] Stopped (${reason || 'stop'})`);
   sendProjectionAck('stopped', reason || null);
   projection.sessionId = null;
   projection.stopping = false;

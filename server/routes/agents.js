@@ -412,6 +412,98 @@ router.post('/screenshot', authenticateToken, async (req, res) => {
   }
 });
 
+/**
+ * Per-guest health/diagnostics for the dashboard. Aggregates:
+ *   - Node agent online (Socket.IO presence),
+ *   - Python agent reachable + api_key OK (HTTP 5555 /selftest),
+ *   - capture/overlay dependency status + a real test capture,
+ *   - current projection state for this guest.
+ * Lets the macOS host pinpoint why a Windows guest screenshot/overlay fails.
+ */
+router.post('/diagnose', authenticateToken, async (req, res) => {
+  const connectedComputers = req.app.get('connectedComputers');
+  const { computerId, ip, mac } = req.body || {};
+  const { targetId, strategy } = pickAgentTargetId(connectedComputers, { computerId, ip, mac });
+
+  const out = {
+    success: true,
+    resolvedComputerId: targetId || null,
+    resolutionStrategy: strategy || null,
+    nodeAgentOnline: Boolean(targetId),
+    pythonAgentReachable: false,
+    apiKeyOk: false,
+    deps: {},
+    capture: {},
+    overlay: {},
+    elevated: null,
+    projection: null,
+    guest: null,
+    errors: [],
+  };
+
+  // Current projection state for this guest (server-side truth).
+  try {
+    const status = projectionManager.status();
+    if (status.active && targetId) {
+      out.projection = (status.session.perGuest || []).find((g) => g.id === targetId) || null;
+    }
+  } catch { /* ignore */ }
+
+  if (!targetId) {
+    out.errors.push('Node agent for this PC is not connected to the server (Socket.IO). Start/restart pc-agent/agent.js on the guest.');
+    return res.json(out);
+  }
+
+  const apiKey = getPcAgentApiKey();
+  if (!apiKey) {
+    out.errors.push(`Server api_key not configured. Set PC_AGENT_API_KEY in server/.env or sync agent_config.json (${getPcAgentConfigPathTried()}).`);
+    return res.json(out);
+  }
+
+  const lanIp = resolveLanIpForPcAgent(connectedComputers, targetId, ip);
+  if (!lanIp) {
+    out.errors.push('Could not resolve the guest LAN IP for the Python agent.');
+    return res.json(out);
+  }
+  out.lanIp = lanIp;
+
+  try {
+    const r = await axios.get(`http://${lanIp}:${PC_AGENT_PORT}/selftest`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      timeout: 12000,
+      validateStatus: () => true,
+    });
+    if (r.status === 401 || r.status === 403) {
+      out.pythonAgentReachable = true;
+      out.apiKeyOk = false;
+      out.errors.push('api_key mismatch — the guest Python agent rejected the key (sync PC_AGENT_API_KEY with the guest agent_config.json).');
+    } else if (r.status === 200 && r.data) {
+      out.pythonAgentReachable = true;
+      out.apiKeyOk = true;
+      out.guest = r.data;
+      out.deps = r.data.deps || {};
+      out.capture = r.data.capture || {};
+      out.overlay = r.data.overlay || {};
+      out.elevated = r.data.elevated ?? null;
+      if (out.capture && out.capture.ok === false && out.capture.error) {
+        out.errors.push(`Guest capture failed: ${out.capture.error}`);
+      }
+      if (out.deps && out.deps.mss === false) out.errors.push('Guest: mss not installed (pip install mss) — falling back to Pillow.');
+      if (out.overlay && out.overlay.script_present === false) out.errors.push('Guest: projection_overlay.py missing next to the Python agent.');
+      if (out.elevated === false) out.errors.push('Guest agent is NOT elevated — full input lock needs Administrator.');
+    } else {
+      out.pythonAgentReachable = true;
+      out.errors.push(`Guest /selftest returned HTTP ${r.status}.`);
+    }
+  } catch (e) {
+    out.errors.push(
+      `Python agent unreachable at ${lanIp}:${PC_AGENT_PORT} (${e.code || e.message}). Check it is running and the guest firewall allows inbound TCP ${PC_AGENT_PORT} on the LAN.`,
+    );
+  }
+
+  return res.json(out);
+});
+
 // ---- Locked Demo Mode: projection REST fallbacks (socket path is primary) ----
 // These mirror the Socket.IO projection:* events for clients that cannot use
 // the live socket. The browser host normally drives projection over Socket.IO;

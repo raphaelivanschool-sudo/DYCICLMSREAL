@@ -137,6 +137,35 @@ def _get_os_string() -> str:
     return platform.platform()
 
 
+def _is_elevated() -> bool:
+    """True if the agent runs elevated (Admin on Windows / root elsewhere)."""
+    try:
+        if platform.system().lower().startswith("win"):
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        return os.geteuid() == 0  # type: ignore[attr-defined]
+    except Exception:
+        return False
+
+
+def _overlay_dep_status() -> Dict[str, bool]:
+    """Importability of the libs the screenshot + locked overlay actually need."""
+    status: Dict[str, bool] = {}
+    # mss + Pillow -> screenshots; tkinter + Pillow + ctypes -> overlay/input-lock.
+    # pywin32 is only needed to run the agent as a Windows service (not the overlay).
+    for label, module in (
+        ("mss", "mss"),
+        ("Pillow", "PIL"),
+        ("tkinter", "tkinter"),
+        ("pywin32", "win32api"),
+    ):
+        try:
+            __import__(module)
+            status[label] = True
+        except Exception:
+            status[label] = False
+    return status
+
+
 def _disk_percent() -> float:
     try:
         usage = psutil.disk_usage(os.path.abspath(os.sep))
@@ -293,6 +322,53 @@ def create_app(config: AgentConfig, logger: logging.Logger) -> Flask:
         except Exception as e:
             logger.error("status failed: %s\n%s", e, traceback.format_exc())
             return jsonify({"error": "Failed to get status"}), 500
+
+    @app.get("/selftest")
+    @auth_required
+    def selftest() -> Tuple[Response, int]:
+        """
+        Structured guest health for the dashboard: dependency presence, a real
+        test capture, overlay-launch readiness, and elevation. Lets the macOS
+        host diagnose the Windows guest without seeing its screen.
+        """
+        deps = _overlay_dep_status()
+
+        capture: Dict[str, Any] = {"ok": False, "backend": None, "error": None}
+        try:
+            img = _capture_rgb_image()
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=40)
+            capture = {
+                "ok": True,
+                "backend": "mss" if _mss is not None else "PIL",
+                "bytes": buf.tell(),
+                "width": int(img.size[0]),
+                "height": int(img.size[1]),
+                "error": None,
+            }
+        except Exception as e:
+            capture = {"ok": False, "backend": None, "error": str(e)}
+
+        overlay_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "projection_overlay.py")
+        overlay = {
+            "script_present": os.path.exists(overlay_script),
+            "tkinter_ok": deps.get("tkinter", False),
+            "pillow_ok": deps.get("Pillow", False),
+            "input_lock_ready": platform.system().lower().startswith("win") and _is_elevated(),
+        }
+
+        payload = {
+            "ok": True,
+            "hostname": platform.node(),
+            "os": _get_os_string(),
+            "agent_version": AGENT_VERSION,
+            "elevated": _is_elevated(),
+            "deps": deps,
+            "capture": capture,
+            "overlay": overlay,
+            "timestamp": _now_str(),
+        }
+        return jsonify(payload), 200
 
     @app.get("/screenshot")
     @auth_required
