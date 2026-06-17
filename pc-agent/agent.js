@@ -233,61 +233,122 @@ const HOSTS_PATH = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
 const BLOCK_START_MARKER = '# DYCICLMS_WEBSITE_BLOCK_START';
 const BLOCK_END_MARKER = '# DYCICLMS_WEBSITE_BLOCK_END';
 
+// --- Network interface selection (robust against virtual / stale NICs) ------
+// The server reaches this guest's HTTP surface (screenshot / overlay-log /
+// diagnose on TCP 5555) by IP, so the agent must report the address the server
+// can ACTUALLY reach — the default-route LAN interface — not a VMware / Hyper-V
+// / Radmin / WSL / Docker / VPN adapter that may sort first. We also report the
+// full candidate list (ipAddresses / interfaceBindings) and refresh it on every
+// heartbeat so a DHCP / NIC change self-heals within one beat.
+const VIRTUAL_IFACE_RE =
+  /(vmware|virtualbox|vbox|hyper-?v|vethernet|radmin|hamachi|\bwsl\b|docker|loopback|\btap\b|tunnel|npcap|bluetooth|zerotier|tailscale|nordlynx|wireguard|teredo|isatap|pseudo|virtual)/i;
+
+// IPv4 ranges we never want to advertise as the reachable LAN address.
+function isVirtualIpv4(ip) {
+  if (!ip || typeof ip !== 'string') return true;
+  return (
+    ip.startsWith('127.') ||
+    ip.startsWith('0.') ||
+    ip.startsWith('169.254.') || // APIPA (no DHCP lease)
+    ip.startsWith('192.168.56.') || // VirtualBox host-only
+    ip.startsWith('25.') || // Radmin VPN
+    ip.startsWith('26.') // Radmin VPN
+  );
+}
+
+function isVirtualIface(iface) {
+  if (!iface) return true;
+  if (iface.virtual === true) return true;
+  return VIRTUAL_IFACE_RE.test(`${iface.iface || ''} ${iface.ifaceName || ''}`);
+}
+
+// Same /24 as the server → strong signal this is the on-LAN interface.
+function sameSubnet24(a, b) {
+  if (!a || !b) return false;
+  const pa = String(a).split('.');
+  const pb = String(b).split('.');
+  if (pa.length !== 4 || pb.length !== 4) return false;
+  return pa[0] === pb[0] && pa[1] === pb[1] && pa[2] === pb[2];
+}
+
+function serverHostFromUrl(url) {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Rank real IPv4 interfaces and return the best reachable LAN one plus the full
+ * candidate list. Highest signal first: the OS default-route interface, then an
+ * interface on the server's subnet, then non-virtual + link-up.
+ * @returns {{ primary: {ip,mac,iface}|null, candidates: Array<{ip,mac,iface}> }}
+ */
+function selectNetwork(allInterfaces, { serverHost, defaultIfaceName } = {}) {
+  const real = (allInterfaces || []).filter(
+    (i) => i && i.ip4 && !i.internal && !isVirtualIpv4(i.ip4),
+  );
+  const score = (i) => {
+    let s = 0;
+    if (defaultIfaceName && i.iface === defaultIfaceName) s += 1000;
+    if (serverHost && sameSubnet24(i.ip4, serverHost)) s += 500;
+    if (i.operstate === 'up') s += 100;
+    return s;
+  };
+  // Only advertise PHYSICAL interfaces so the server never dials (and the
+  // dashboard never rows) a VMware/Hyper-V/WSL/VPN address. Fall back to the
+  // raw set only if filtering would leave us with nothing to report.
+  const clean = real.filter((i) => !isVirtualIface(i));
+  const pool = clean.length ? clean : real;
+  const ranked = [...pool].sort((a, b) => score(b) - score(a));
+  const candidates = ranked.map((i) => ({
+    ip: i.ip4,
+    mac: i.mac || '',
+    iface: i.iface || '',
+  }));
+  const primary = ranked[0]
+    ? { ip: ranked[0].ip4, mac: ranked[0].mac || '', iface: ranked[0].iface || '' }
+    : null;
+  return { primary, candidates };
+}
+
+/** Live network snapshot used by both registration and heartbeat. */
+async function getNetworkSnapshot() {
+  try {
+    const [network, defIface] = await Promise.all([
+      si.networkInterfaces(),
+      si.networkInterfaceDefault().catch(() => ''),
+    ]);
+    const { primary, candidates } = selectNetwork(Object.values(network).flat(), {
+      serverHost: serverHostFromUrl(CONFIG.serverUrl),
+      defaultIfaceName: defIface,
+    });
+    return {
+      ip: primary?.ip || '127.0.0.1',
+      mac: primary?.mac || 'unknown',
+      ipAddresses: candidates.map((c) => c.ip),
+      interfaceBindings: candidates,
+    };
+  } catch (error) {
+    console.error('Error resolving network snapshot:', error);
+    return { ip: '127.0.0.1', mac: 'unknown', ipAddresses: [], interfaceBindings: [] };
+  }
+}
+
 // Get computer information
 async function getComputerInfo() {
   try {
-    const [system, cpu, mem, osInfo, network, graphics] = await Promise.all([
+    const [system, cpu, mem, osInfo, graphics] = await Promise.all([
       si.system(),
       si.cpu(),
       si.mem(),
       si.osInfo(),
-      si.networkInterfaces(),
       si.graphics()
     ]);
 
-    // Get IP address - prioritize 192.168.0.x LAN subnet
-    let ipAddress = '127.0.0.1';
-    const allInterfaces = Object.values(network).flat();
-    
-    // First priority: 192.168.0.x (where test PC should be)
-    const lanInterface = allInterfaces.find(
-      iface => iface && iface.ip4 &&
-        !iface.internal &&
-        iface.ip4.startsWith('192.168.0.')
-    );
-
-    let homeInterface;
-    let fallbackInterface;
-
-    if (lanInterface) {
-      ipAddress = lanInterface.ip4;
-    } else {
-      // Second priority: any 192.168.x.x except VirtualBox (192.168.56.x)
-      homeInterface = allInterfaces.find(
-        iface => iface && iface.ip4 &&
-          !iface.internal &&
-          iface.ip4.startsWith('192.168.') &&
-          !iface.ip4.startsWith('192.168.56.')  // Skip VirtualBox
-      );
-
-      if (homeInterface) {
-        ipAddress = homeInterface.ip4;
-      } else {
-        // Fallback: any valid non-localhost IP
-        fallbackInterface = allInterfaces.find(
-          iface => iface && iface.ip4 &&
-            !iface.internal &&
-            !iface.ip4.startsWith('127.') &&
-            !iface.ip4.startsWith('0.') &&
-            !iface.ip4.startsWith('169.254.')
-        );
-        if (fallbackInterface) {
-          ipAddress = fallbackInterface.ip4;
-        }
-      }
-    }
-
-    const chosenIface = lanInterface || homeInterface || fallbackInterface;
+    // Reachable LAN IP + full candidate list (see getNetworkSnapshot).
+    const net = await getNetworkSnapshot();
 
     // Get logged in user
     const user = await getLoggedInUser();
@@ -295,8 +356,10 @@ async function getComputerInfo() {
     return {
       id: CONFIG.computerId,
       name: os.hostname(),
-      ip: ipAddress,
-      mac: chosenIface && chosenIface.mac ? chosenIface.mac : 'unknown',
+      ip: net.ip,
+      mac: net.mac,
+      ipAddresses: net.ipAddresses,
+      interfaceBindings: net.interfaceBindings,
       platform: osInfo.platform,
       distro: osInfo.distro,
       release: osInfo.release,
@@ -357,11 +420,18 @@ async function getSystemStatus() {
     ]);
 
     const user = await getLoggedInUser();
+    // Refresh the reachable LAN IP every beat so a DHCP / NIC change self-heals
+    // without restarting the agent (server applies these in agent_status_update).
+    const net = await getNetworkSnapshot();
 
     return {
       computerId: CONFIG.computerId,
       status: 'online',
       user: user,
+      ip: net.ip,
+      mac: net.mac,
+      ipAddresses: net.ipAddresses,
+      interfaceBindings: net.interfaceBindings,
       cpu: cpu.currentLoad.toFixed(1),
       memory: {
         total: mem.total,

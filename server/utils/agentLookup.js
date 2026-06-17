@@ -104,26 +104,49 @@ export function pickAgentTargetId(connectedComputers, { computerId, ip, mac }) {
 }
 
 /**
+ * IPs we must never dial as the guest's reachable LAN address: loopback, APIPA,
+ * and known virtual / VPN adapter ranges (VirtualBox host-only, Radmin VPN).
+ * Mirrors the guest agent's interface filter so both ends agree on "reachable".
+ */
+export function isReachableLanIp(ip) {
+  const n = normalizeIp(ip);
+  if (!n) return false;
+  if (n === "127.0.0.1" || n === "::1") return false;
+  if (n.startsWith("127.") || n.startsWith("0.") || n.startsWith("169.254.")) return false;
+  if (n.startsWith("192.168.56.")) return false; // VirtualBox host-only
+  if (n.startsWith("25.") || n.startsWith("26.")) return false; // Radmin VPN
+  return true;
+}
+
+/**
  * Choose the LAN IP used to reach the PC agent HTTP API (Flask on port 5555).
- * Prefer the discovery-row IP from the dashboard when it is not loopback.
+ *
+ * Keys on the agent's LIVE report (refreshed every heartbeat), NOT the dashboard
+ * discovery row, which can go stale when DHCP/NIC changes the address. Order:
+ *   1. the agent's live primary IP (its default-route LAN interface),
+ *   2. the dashboard hint, but ONLY if the agent still reports it as a live
+ *      interface (rejects a stale row IP for a dead address),
+ *   3. any other live reachable IP, then the raw hint as a last resort.
  */
 export function resolveLanIpForPcAgent(connectedComputers, targetId, hintIp) {
   if (!targetId || !connectedComputers?.has(targetId)) {
     return null;
   }
-  const hint = normalizeIp(hintIp || "");
-  if (hint && hint !== "127.0.0.1" && hint !== "::1") {
-    return hint;
-  }
   const entry = connectedComputers.get(targetId);
   const c = entry?.computer || {};
-  const ips = [...collectIpsFromComputer(c)];
-  const lan = ips.find(
-    (i) =>
-      i &&
-      !i.startsWith("127.") &&
-      !i.startsWith("::1") &&
-      !i.startsWith("169.254."),
-  );
-  return lan || ips[0] || null;
+  const live = [...collectIpsFromComputer(c)].filter(isReachableLanIp);
+
+  // 1. Live primary IP — self-heals on DHCP/NIC change; chosen by the guest's
+  //    interface selection (default route + server subnet).
+  const primary = normalizeIp(c.ip || "");
+  if (isReachableLanIp(primary)) return primary;
+
+  // 2. Honor the dashboard hint only if it is still a live interface.
+  const hint = normalizeIp(hintIp || "");
+  if (isReachableLanIp(hint) && live.includes(hint)) return hint;
+
+  // 3. Any other live reachable IP, then the hint as a last resort.
+  if (live.length) return live[0];
+  if (isReachableLanIp(hint)) return hint;
+  return null;
 }
