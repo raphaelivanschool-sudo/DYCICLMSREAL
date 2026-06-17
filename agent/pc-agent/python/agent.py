@@ -9,6 +9,8 @@ import os
 import platform
 import queue
 import subprocess
+import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -164,6 +166,52 @@ def _overlay_dep_status() -> Dict[str, bool]:
         except Exception:
             status[label] = False
     return status
+
+
+# The locked overlay (projection_overlay.py) logs here. Both the overlay and this
+# agent resolve the same per-user %TEMP%, so this agent can read it back for the
+# macOS host (which cannot see the guest filesystem). Keep this path in lockstep
+# with LOG_PATH in projection_overlay.py.
+OVERLAY_LOG_PATH = os.path.join(tempfile.gettempdir(), "dyci_projection_overlay.log")
+
+
+def _tail_text_file(path: str, max_lines: int) -> Dict[str, Any]:
+    """Read the last `max_lines` lines of a UTF-8 text file without loading it all."""
+    info: Dict[str, Any] = {
+        "path": path,
+        "exists": False,
+        "size_bytes": 0,
+        "modified": None,
+        "lines": [],
+        "truncated": False,
+    }
+    try:
+        st = os.stat(path)
+    except OSError:
+        return info  # file not present yet (overlay never launched / different user)
+    info["exists"] = True
+    info["size_bytes"] = int(st.st_size)
+    try:
+        info["modified"] = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        pass
+    try:
+        # Read a bounded tail (256 KiB) so a huge log can't blow up the response.
+        max_bytes = 256 * 1024
+        with open(path, "rb") as f:
+            if st.st_size > max_bytes:
+                f.seek(-max_bytes, os.SEEK_END)
+                info["truncated"] = True
+            raw = f.read()
+        text = raw.decode("utf-8", errors="replace")
+        lines = text.splitlines()
+        if len(lines) > max_lines:
+            lines = lines[-max_lines:]
+            info["truncated"] = True
+        info["lines"] = lines
+    except Exception as e:
+        info["error"] = str(e)
+    return info
 
 
 def _disk_percent() -> float:
@@ -369,6 +417,45 @@ def create_app(config: AgentConfig, logger: logging.Logger) -> Flask:
             "timestamp": _now_str(),
         }
         return jsonify(payload), 200
+
+    @app.get("/overlay-log")
+    @auth_required
+    def overlay_log() -> Tuple[Response, int]:
+        """
+        Return the tail of the locked-overlay log (dyci_projection_overlay.log) plus
+        the environment that determines whether the overlay can even launch. This is
+        the macOS host's window into a Windows guest it cannot otherwise inspect: it
+        surfaces the real traceback when the overlay crash-loops.
+
+        Query: ?lines=N  (default 200, capped 1000).
+        """
+        try:
+            try:
+                want = int(request.args.get("lines", "200"))
+            except Exception:
+                want = 200
+            want = max(1, min(1000, want))
+
+            tail = _tail_text_file(OVERLAY_LOG_PATH, want)
+            deps = _overlay_dep_status()
+            payload = {
+                "ok": True,
+                "hostname": platform.node(),
+                "elevated": _is_elevated(),
+                "agent_python": sys.executable,        # interpreter running THIS agent
+                "agent_python_version": platform.python_version(),
+                "deps": deps,                          # importable in the agent's interpreter
+                "log": tail,                           # {path, exists, size_bytes, modified, lines[], truncated}
+                "note": (
+                    "log.exists=false means the overlay never wrote here under this user's "
+                    "%TEMP% (overlay never launched, or agent/overlay run as different users)."
+                ),
+                "timestamp": _now_str(),
+            }
+            return jsonify(payload), 200
+        except Exception as e:
+            logger.error("overlay-log failed: %s\n%s", e, traceback.format_exc())
+            return jsonify({"error": "Failed to read overlay log"}), 500
 
     @app.get("/screenshot")
     @auth_required

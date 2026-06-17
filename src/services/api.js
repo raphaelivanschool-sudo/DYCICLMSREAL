@@ -155,6 +155,16 @@ export const agentsApi = {
     return api.post("/api/agents/diagnose", body);
   },
 
+  // Tail of the guest's locked-overlay log (dyci_projection_overlay.log) + launch
+  // env — the real Windows traceback when the projection overlay crash-loops.
+  getOverlayLog: (computerId, meta = {}, lines = 200) => {
+    const body = { lines };
+    if (computerId) body.computerId = computerId;
+    if (meta.ip) body.ip = meta.ip;
+    if (meta.mac) body.mac = meta.mac;
+    return api.post("/api/agents/overlay-log", body);
+  },
+
   // Generate agent installer
   createInstaller: (room, serverUrl, computerName) =>
     api.post("/api/agents/installer", { room, serverUrl, computerName }),

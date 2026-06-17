@@ -34,9 +34,17 @@ const projection = {
   lastSpawnAt: 0,
 };
 
-// Resolved once: the first Python launcher on the guest that actually runs.
+// Resolved once: the Python launcher on the guest that can actually run the
+// overlay (Pillow + tkinter importable), with diagnostics about why if not.
 let cachedPythonCmd = null;
+let cachedPythonDepsOk = false;   // PIL.Image + PIL.ImageTk + tkinter all import
+let cachedPythonDetail = '';      // last import error when depsOk is false
 let pythonProbed = false;
+
+// The overlay needs exactly these. Probing the SAME interpreter the agent will
+// launch (e.g. pythonw.exe) catches the #1 failure: deps installed under one
+// python but the launcher resolving to a different one without them.
+const OVERLAY_IMPORT_PROBE = 'import tkinter; from PIL import Image, ImageTk';
 
 // Verbose projection logging — gated so normal runs stay quiet. Errors always log.
 // Enable with PROJECTION_DEBUG=true (env) or "projectionDebug": true in agent.config.json.
@@ -453,6 +461,13 @@ async function connect() {
     });
 
     // High-frequency frame delivery — newest seq wins, stale frames dropped.
+    //
+    // WIRE FORMAT (pinned, host-OS-agnostic). The browser host encodes each frame
+    // with canvas.toBlob('image/jpeg', q) — a real JPEG — then base64-encodes the
+    // raw bytes WITHOUT any "data:image/jpeg;base64," prefix (see blobToBase64 in
+    // DeveloperModePage.jsx). The server relays `screenshot` unchanged. So here
+    // `screenshot` is base64-of-JPEG: decode straight to bytes and write the .jpg.
+    // The overlay then decodes it with Pillow (Image.open). Do NOT re-encode.
     socket.on('projection_frame', async (data) => {
       try {
         const { session_id, seq, screenshot } = data || {};
@@ -816,29 +831,61 @@ function pythonCandidates() {
     : ['python3', 'python'];
 }
 
-/** Probe once for a Python launcher that actually runs on this guest; cache it. */
-function resolvePython() {
-  if (pythonProbed) return Promise.resolve(cachedPythonCmd);
-  const candidates = pythonCandidates();
-  const tryOne = (i) =>
-    new Promise((resolve) => {
-      if (i >= candidates.length) {
-        pythonProbed = true;
-        resolve(null);
+/** Probe a single launcher: does it run, and can it import the overlay's deps? */
+function probePython(py) {
+  return new Promise((resolve) => {
+    execFile(py, ['--version'], { timeout: 5000, windowsHide: true }, (verr) => {
+      if (verr) {
+        resolve({ cmd: py, runs: false });
         return;
       }
-      const py = candidates[i];
-      execFile(py, ['--version'], { timeout: 5000, windowsHide: true }, (err) => {
-        if (!err) {
-          cachedPythonCmd = py;
-          pythonProbed = true;
-          resolve(py);
-        } else {
-          resolve(tryOne(i + 1));
+      execFile(py, ['-c', OVERLAY_IMPORT_PROBE], { timeout: 8000, windowsHide: true }, (derr, _o, stderr) => {
+        if (!derr) {
+          resolve({ cmd: py, runs: true, depsOk: true });
+          return;
         }
+        const detail =
+          String(stderr || derr.message || '')
+            .trim()
+            .split(/\r?\n/)
+            .filter(Boolean)
+            .pop() || 'Pillow/tkinter import failed';
+        resolve({ cmd: py, runs: true, depsOk: false, detail });
       });
     });
-  return tryOne(0);
+  });
+}
+
+/**
+ * Resolve the Python launcher for the overlay. Prefers one where Pillow + tkinter
+ * import; otherwise falls back to the first that merely runs (so the overlay can
+ * still emit a precise ImportError to its log). Sets cachedPythonDepsOk/Detail.
+ */
+async function resolvePython() {
+  // Only trust a confirmed-good cache. If deps were missing last time, re-probe so
+  // a guest that runs `pip install pillow` and retries works without restarting.
+  if (pythonProbed && cachedPythonCmd && cachedPythonDepsOk) return cachedPythonCmd;
+  const candidates = pythonCandidates();
+  const results = [];
+  for (const py of candidates) {
+    const r = await probePython(py);
+    results.push(r);
+    if (r.runs && r.depsOk) {
+      cachedPythonCmd = py;
+      cachedPythonDepsOk = true;
+      cachedPythonDetail = '';
+      pythonProbed = true;
+      return py;
+    }
+  }
+  const runnable = results.find((r) => r.runs);
+  cachedPythonCmd = runnable ? runnable.cmd : null;
+  cachedPythonDepsOk = false;
+  cachedPythonDetail = runnable
+    ? runnable.detail || 'Pillow/tkinter not importable'
+    : 'no Python launcher ran';
+  pythonProbed = true;
+  return cachedPythonCmd;
 }
 
 /** Touch/refresh the heartbeat file the overlay watchdog reads. */
@@ -894,13 +941,30 @@ function spawnOverlayProc() {
   projection.overlayProc = proc;
   projection.lastSpawnAt = Date.now();
 
+  // Capture stderr so a crash reports the real reason to the dashboard instead of
+  // a generic "keeps crashing". The overlay prints "OVERLAY_FATAL: <reason>" for
+  // unrecoverable startup failures (e.g. missing deps) — surface those verbatim.
+  let stderrTail = '';
+  let fatalLine = null;
+
   proc.on('spawn', () => pdlog(`[Projection] Overlay launched via ${projection.pythonCmd} (PID ${proc.pid})`));
   if (proc.stderr) {
     proc.stderr.on('data', (d) => {
-      const line = String(d).trim();
-      if (line) console.error('[Overlay]', line);
+      const text = String(d);
+      stderrTail = (stderrTail + text).slice(-2000);
+      for (const raw of text.split(/\r?\n/)) {
+        const line = raw.trim();
+        if (!line) continue;
+        console.error('[Overlay]', line);
+        if (line.startsWith('OVERLAY_FATAL:')) {
+          fatalLine = line.slice('OVERLAY_FATAL:'.length).trim();
+        }
+      }
     });
   }
+  const lastStderrLine = () =>
+    stderrTail.trim().split(/\r?\n/).filter(Boolean).pop() || '';
+
   proc.on('error', (err) => {
     if (projection.overlayProc === proc) projection.overlayProc = null;
     onOverlayFatal(`Overlay process error (${projection.pythonCmd}): ${err.message}`);
@@ -909,12 +973,32 @@ function spawnOverlayProc() {
     if (projection.overlayProc === proc) projection.overlayProc = null;
     pdlog(`[Projection] Overlay exited (code=${code} signal=${signal || '-'})`);
     if (!projection.active || projection.stopping) return;
+
+    // A structured startup failure won't fix itself on relaunch — report it now.
+    if (fatalLine) {
+      onOverlayFatal(`overlay: ${fatalLine}`);
+      return;
+    }
+    // Exit code 2 == overlay's "required UI libs missing" path.
+    if (code === 2) {
+      const tail = lastStderrLine();
+      onOverlayFatal(
+        `Overlay exited reporting missing UI libraries (need Pillow + tkinter)${tail ? `: ${tail}` : '.'} ` +
+          `Fetch the full log via "Overlay log" or scripts\\guest-get-overlay-log.ps1.`,
+      );
+      return;
+    }
     // Crash-loop guard: relaunch, but give up after repeated rapid failures.
     const now = Date.now();
     if (now - projection.lastSpawnAt < 3000) projection.relaunchCount += 1;
     else projection.relaunchCount = 0;
     if (projection.relaunchCount >= 3) {
-      onOverlayFatal('Overlay keeps crashing on the guest. See %TEMP%\\dyci_projection_overlay.log for details (check Pillow is installed and the agent is elevated).');
+      const tail = lastStderrLine();
+      onOverlayFatal(
+        `Overlay keeps crashing on the guest${tail ? ` (last error: ${tail})` : ''}. ` +
+          `Fetch the full traceback via "Overlay log" or scripts\\guest-get-overlay-log.ps1 ` +
+          `(check Pillow + tkinter are installed and the agent is elevated).`,
+      );
       return;
     }
     pdlog('[Projection] supervisor relaunching overlay…');
@@ -948,6 +1032,16 @@ async function startProjection(data) {
   if (!py) {
     onOverlayFatal(
       `No working Python found on guest (tried: ${pythonCandidates().join(', ')}). Install Python 3 + Pillow.`,
+    );
+    return;
+  }
+  // The interpreter runs but can't import the overlay's deps — reporting this
+  // up front beats spawning a guaranteed crash-loop. (#1 real-world cause.)
+  if (!cachedPythonDepsOk) {
+    onOverlayFatal(
+      `Overlay can't start: Pillow/tkinter not importable in the guest's "${py}" (${cachedPythonDetail}). ` +
+        `On the guest run:  ${py} -m pip install pillow  ` +
+        `(tkinter ships with the python.org installer; the Microsoft Store build omits it).`,
     );
     return;
   }

@@ -95,6 +95,8 @@ function DeveloperModePage() {
   const [autoRefreshScreenshot, setAutoRefreshScreenshot] = useState(false);
   const [diagnosis, setDiagnosis] = useState(null);
   const [diagnosing, setDiagnosing] = useState(false);
+  const [overlayLog, setOverlayLog] = useState(null); // { lines, exists, ... } | { error }
+  const [overlayLogFetching, setOverlayLogFetching] = useState(false);
   // Locked Demo Mode (host screen broadcast) state.
   const [projectionSession, setProjectionSession] = useState(null); // { sessionId, perGuest, config }
   const [projectionStatus, setProjectionStatus] = useState('');
@@ -339,9 +341,31 @@ function DeveloperModePage() {
     }
   }, [selectedDevice?.agentId, selectedDevice?.ip, selectedDevice?.mac]);
 
-  // Clear stale diagnosis when switching rows.
+  const fetchOverlayLog = useCallback(async () => {
+    if (!selectedDevice?.ip) return;
+    setOverlayLogFetching(true);
+    setOverlayLog(null);
+    try {
+      const res = await agentsApi.getOverlayLog(
+        selectedDevice.agentId,
+        { ip: selectedDevice.ip, mac: selectedDevice.mac },
+        200,
+      );
+      setOverlayLog(res?.data || null);
+    } catch (error) {
+      setOverlayLog({
+        success: false,
+        error: error.response?.data?.error || error.message || 'Overlay-log request failed',
+      });
+    } finally {
+      setOverlayLogFetching(false);
+    }
+  }, [selectedDevice?.agentId, selectedDevice?.ip, selectedDevice?.mac]);
+
+  // Clear stale diagnosis / overlay log when switching rows.
   useEffect(() => {
     setDiagnosis(null);
+    setOverlayLog(null);
   }, [selectedIp]);
 
   useEffect(() => {
@@ -1124,8 +1148,47 @@ function DeveloperModePage() {
                 >
                   {diagnosing ? 'Diagnosing…' : '🩺 Diagnose guest'}
                 </button>
+                <button
+                  type="button"
+                  onClick={fetchOverlayLog}
+                  disabled={!selectedDevice?.ip || overlayLogFetching}
+                  title="Fetch the guest's locked-overlay log (the real traceback when projection crash-loops)"
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm text-gray-800 bg-gray-200 hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {overlayLogFetching ? 'Fetching…' : '📄 Overlay log'}
+                </button>
               </div>
             </div>
+
+            {overlayLog && (
+              <div className="rounded-lg border border-gray-300 bg-white p-4 text-sm">
+                <p className="font-semibold text-gray-900 mb-2">Overlay log (guest %TEMP%\dyci_projection_overlay.log)</p>
+                {overlayLog.success === false ? (
+                  <div className="rounded border border-red-200 bg-red-50 p-2 text-xs text-red-800">{overlayLog.error}</div>
+                ) : (
+                  <>
+                    <p className="text-xs text-gray-500 mb-2">
+                      {overlayLog.log?.exists
+                        ? `${overlayLog.log?.size_bytes ?? 0} bytes · modified ${overlayLog.log?.modified || '—'}`
+                        : 'No log yet — the overlay has not written under this user’s %TEMP% (it never launched, or agent/overlay run as different users).'}
+                      {overlayLog.elevated === false ? '  · agent NOT elevated' : ''}
+                      {overlayLog.deps
+                        ? `  · deps: ${Object.entries(overlayLog.deps).map(([k, v]) => `${k}${v ? '✓' : '✗'}`).join(' ')}`
+                        : ''}
+                    </p>
+                    {overlayLog.log?.lines?.length > 0 ? (
+                      <pre className="max-h-72 overflow-auto rounded bg-[#1e1e1e] p-3 text-[11px] leading-relaxed text-gray-100 whitespace-pre-wrap break-words">
+                        {overlayLog.log.lines.join('\n')}
+                      </pre>
+                    ) : (
+                      overlayLog.log?.exists && (
+                        <p className="text-xs text-gray-500">Log file is empty.</p>
+                      )
+                    )}
+                  </>
+                )}
+              </div>
+            )}
 
             {diagnosis && (
               <div className="rounded-lg border border-gray-300 bg-white p-4 text-sm">

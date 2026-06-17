@@ -504,6 +504,85 @@ router.post('/diagnose', authenticateToken, async (req, res) => {
   return res.json(out);
 });
 
+/**
+ * Tail of the guest's locked-overlay log (dyci_projection_overlay.log) + the
+ * env that decides whether the overlay can launch. This is how the macOS host
+ * reads the real Windows traceback when the overlay crash-loops — it proxies to
+ * the guest Python agent's GET /overlay-log over HTTP 5555 using the api_key.
+ *
+ * Body: { computerId?, ip?, mac?, lines? }  (lines default 200, capped 1000)
+ */
+router.post('/overlay-log', authenticateToken, async (req, res) => {
+  try {
+    const apiKey = getPcAgentApiKey();
+    if (!apiKey) {
+      return res.status(503).json({
+        success: false,
+        error:
+          `Overlay log unavailable: Python agent api_key not configured. Set PC_AGENT_API_KEY in server/.env ` +
+          `or sync agent_config.json (see ${getPcAgentConfigPathTried()}).`,
+      });
+    }
+
+    const connectedComputers = req.app.get('connectedComputers');
+    const { computerId, ip, mac } = req.body || {};
+    const lines = Math.max(1, Math.min(1000, parseInt(req.body?.lines, 10) || 200));
+    const { targetId, strategy } = pickAgentTargetId(connectedComputers, { computerId, ip, mac });
+    if (!targetId) {
+      return res.status(404).json({
+        success: false,
+        error: 'No online agent matches this PC. Ensure the DYCI agent is running and connected.',
+      });
+    }
+
+    const lanIp = resolveLanIpForPcAgent(connectedComputers, targetId, ip);
+    if (!lanIp) {
+      return res.status(400).json({ success: false, error: 'Could not resolve the guest agent LAN IP.' });
+    }
+
+    const url = `http://${lanIp}:${PC_AGENT_PORT}/overlay-log?lines=${lines}`;
+    let guestResp;
+    try {
+      guestResp = await axios.get(url, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        timeout: 12000,
+        validateStatus: () => true,
+      });
+    } catch (e) {
+      const msg =
+        e.code === 'ECONNREFUSED' || e.code === 'ETIMEDOUT' || e.code === 'EHOSTUNREACH'
+          ? `Could not reach the Python agent at ${lanIp}:${PC_AGENT_PORT}. Confirm it is running and that the guest firewall allows TCP ${PC_AGENT_PORT} on the LAN.`
+          : e.message || 'Overlay-log request failed';
+      return res.status(502).json({ success: false, error: msg });
+    }
+
+    if (guestResp.status === 401 || guestResp.status === 403) {
+      return res.status(guestResp.status).json({
+        success: false,
+        error: 'Guest agent rejected the api_key — it must match the server (PC_AGENT_API_KEY / agent_config.json).',
+      });
+    }
+    if (guestResp.status !== 200 || !guestResp.data?.log) {
+      const detail =
+        (typeof guestResp.data === 'object' && guestResp.data?.error) ||
+        guestResp.statusText ||
+        String(guestResp.status);
+      return res.status(502).json({ success: false, error: `Guest overlay-log failed: ${detail}` });
+    }
+
+    return res.json({
+      success: true,
+      resolvedComputerId: targetId,
+      resolutionStrategy: strategy,
+      lanIp,
+      ...guestResp.data,
+    });
+  } catch (error) {
+    console.error('[agents/overlay-log]', error);
+    res.status(500).json({ success: false, error: 'Overlay log failed (server error)' });
+  }
+});
+
 // ---- Locked Demo Mode: projection REST fallbacks (socket path is primary) ----
 // These mirror the Socket.IO projection:* events for clients that cannot use
 // the live socket. The browser host normally drives projection over Socket.IO;

@@ -45,6 +45,26 @@ logging.basicConfig(
 log = logging.getLogger("projection_overlay")
 
 
+def _emit_fatal(msg: str) -> None:
+    """
+    Report an unrecoverable startup/runtime failure both ways:
+      * to the log file (LOG_PATH) for the operator / `guest-get-overlay-log.ps1`,
+      * to stderr with an "OVERLAY_FATAL:" prefix that the Node agent parses and
+        surfaces to the dashboard verbatim (instead of a generic "keeps crashing").
+    Safe under pythonw.exe, where sys.stderr can be None.
+    """
+    try:
+        log.error(msg)
+    except Exception:
+        pass
+    try:
+        if sys.stderr is not None:
+            sys.stderr.write(f"OVERLAY_FATAL: {msg}\n")
+            sys.stderr.flush()
+    except Exception:
+        pass
+
+
 # --------------------------------------------------------------------------- #
 # Global input blocking (Windows low-level keyboard + mouse hooks via ctypes). #
 # Low-level hooks do NOT require DLL injection but DO require the installing    #
@@ -55,7 +75,12 @@ class InputBlocker:
     WH_MOUSE_LL = 14
     WM_QUIT = 0x0012
 
-    def __init__(self):
+    def __init__(self, exit_vk=None, on_exit_key=None):
+        # exit_vk: a virtual-key code allowed to TRIGGER teardown even while the
+        # lock is engaged (test/diagnostic escape hatch). None in production, so
+        # nothing the guest presses can dismiss the overlay. on_exit_key: callback
+        # fired (on the hook thread) when that key is seen — the key itself is
+        # still swallowed from the OS underneath.
         self._thread = None
         self._thread_id = None
         self._kb_hook = None
@@ -64,6 +89,8 @@ class InputBlocker:
         self._mouse_proc = None
         self.active = False
         self.error = None
+        self._exit_vk = exit_vk
+        self._on_exit_key = on_exit_key
 
     def start(self):
         if not IS_WINDOWS:
@@ -95,7 +122,19 @@ class InputBlocker:
             kernel32.GetModuleHandleW.argtypes = [wt.LPCWSTR]
             kernel32.GetCurrentThreadId.restype = wt.DWORD
 
-            def _make_proc(hook_ref):
+            WM_KEYDOWN = 0x0100
+            WM_SYSKEYDOWN = 0x0104
+
+            class KBDLLHOOKSTRUCT(ctypes.Structure):
+                _fields_ = [
+                    ("vkCode", wt.DWORD),
+                    ("scanCode", wt.DWORD),
+                    ("flags", wt.DWORD),
+                    ("time", wt.DWORD),
+                    ("dwExtraInfo", ctypes.c_void_p),
+                ]
+
+            def _make_mouse_proc(hook_ref):
                 def _proc(nCode, wParam, lParam):
                     # nCode == HC_ACTION (0) and >=0 means a real event: swallow it
                     # by returning non-zero WITHOUT chaining to CallNextHookEx.
@@ -104,10 +143,29 @@ class InputBlocker:
                     return user32.CallNextHookEx(hook_ref[0], nCode, wParam, lParam)
                 return _proc
 
+            def _make_kb_proc(hook_ref):
+                def _proc(nCode, wParam, lParam):
+                    if nCode >= 0:
+                        # Test/diagnostic escape hatch: if a whitelisted exit key is
+                        # pressed, fire the teardown callback. The key is still
+                        # swallowed (return 1) so it never leaks to the OS beneath.
+                        if self._exit_vk is not None and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
+                            try:
+                                kb = ctypes.cast(
+                                    lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)
+                                ).contents
+                                if kb.vkCode == self._exit_vk and self._on_exit_key:
+                                    self._on_exit_key()
+                            except Exception:
+                                pass
+                        return 1
+                    return user32.CallNextHookEx(hook_ref[0], nCode, wParam, lParam)
+                return _proc
+
             kb_ref = [None]
             mouse_ref = [None]
-            self._kb_proc = HOOKPROC(_make_proc(kb_ref))
-            self._mouse_proc = HOOKPROC(_make_proc(mouse_ref))
+            self._kb_proc = HOOKPROC(_make_kb_proc(kb_ref))
+            self._mouse_proc = HOOKPROC(_make_mouse_proc(mouse_ref))
 
             hmod = kernel32.GetModuleHandleW(None)
             self._thread_id = kernel32.GetCurrentThreadId()
@@ -200,20 +258,42 @@ def main():
         default=0.0,
         help="diagnostics dry-run: skip input lock + watchdog, auto-close after N seconds",
     )
+    parser.add_argument(
+        "--locked-test-seconds",
+        type=float,
+        default=0.0,
+        help=(
+            "standalone locked test: ENGAGE the real input lock, skip the heartbeat "
+            "watchdog, allow the --exit-key escape hatch, and hard auto-close after N "
+            "seconds. For scripts/test-overlay.ps1 — not used in production."
+        ),
+    )
+    parser.add_argument(
+        "--exit-key",
+        type=int,
+        default=0x1B,  # VK_ESCAPE
+        help="virtual-key code that ends the locked test (default 27 = ESC)",
+    )
     args = parser.parse_args()
-    selftest = args.selftest_seconds and args.selftest_seconds > 0
+    selftest = bool(args.selftest_seconds and args.selftest_seconds > 0)
+    locked_test = bool(args.locked_test_seconds and args.locked_test_seconds > 0)
 
     log.info(
-        "overlay starting (session=%s, frame=%s, selftest=%s)",
-        args.session, args.frame, selftest,
+        "overlay starting (session=%s, frame=%s, selftest=%s, locked_test=%s)",
+        args.session, args.frame, selftest, locked_test,
     )
+
+    # FRAME CONTRACT (must match the host encoder + Node agent): --frame points at
+    # a file holding the raw bytes of a single JPEG image (what the browser host
+    # produced via canvas.toBlob('image/jpeg', q), relayed unchanged). We decode it
+    # with Pillow's Image.open below, so any Pillow-readable still image also works;
+    # the pinned wire format is JPEG. Each frame is wrapped in try/except — one bad
+    # frame is skipped, never fatal.
     try:
         import tkinter as tk
         from PIL import Image, ImageTk
     except Exception as e:  # pragma: no cover
-        msg = f"required UI libs missing (need Pillow + tkinter): {e}"
-        sys.stderr.write(f"projection_overlay: {msg}\n")
-        log.error(msg)
+        _emit_fatal(f"required UI libs missing (need Pillow + tkinter): {e}")
         return 2
 
     # Mark DPI awareness so geometry matches physical pixels on Windows.
@@ -227,8 +307,13 @@ def main():
                 pass
 
     # In selftest (diagnostics dry-run) mode we never lock input — that would
-    # trap the person running the test. We just verify the window can be built.
-    blocker = InputBlocker()
+    # trap the person running the test; we just verify the window can be built.
+    # In locked-test mode we DO lock, but wire an exit-key escape hatch so the
+    # tester is never trapped (auto-close is the backstop). Production locks with
+    # no escape key (exit_vk=None).
+    exit_requested = threading.Event()
+    exit_vk = int(args.exit_key) if locked_test else None
+    blocker = InputBlocker(exit_vk=exit_vk, on_exit_key=exit_requested.set)
     if not selftest:
         blocker.start()
 
@@ -266,8 +351,9 @@ def main():
         if not state["running"]:
             return
         state["running"] = False
+        log.info("overlay stopping (reason=%s, got_frame=%s)", reason or "?", state["got_frame"])
         try:
-            blocker.stop()
+            blocker.stop()  # always restore input, even on a hard/early teardown
         finally:
             try:
                 root.destroy()
@@ -334,11 +420,17 @@ def main():
                     photo = ImageTk.PhotoImage(canvas)
                     state["photo"] = photo  # keep a ref
                     label.config(image=photo, text="")
+                    if not state["got_frame"]:
+                        log.info("first frame decoded (%dx%d)", iw, ih)
                     state["got_frame"] = True
         except (OSError, ValueError):
-            pass  # frame not ready / mid-write; try again next tick
-        except Exception:
-            pass
+            pass  # frame not ready / mid-write / not a complete image yet; retry
+        except Exception as e:
+            # A malformed frame must never kill the overlay. Skip it; log the first
+            # occurrence so the failure is diagnosable without spamming the log.
+            if not state.get("decode_warned"):
+                state["decode_warned"] = True
+                log.warning("frame decode/render failed (skipping bad frames): %s", e)
         root.after(60, render_frame)
 
     root.after(100, reassert_topmost)
@@ -347,6 +439,23 @@ def main():
         # Diagnostics dry-run: skip the heartbeat watchdog and auto-close.
         label.config(text="DYCI overlay self-test OK — closing…")
         root.after(int(args.selftest_seconds * 1000), lambda: shutdown("selftest_done"))
+    elif locked_test:
+        # Standalone locked test: the real lock is engaged. Guaranteed teardown via
+        # (a) hard auto-close timer and (b) the --exit-key escape hatch; the
+        # heartbeat watchdog is intentionally skipped (nothing refreshes it here).
+        log.info("locked-test mode: lock engaged, exit_vk=%s, auto-close in %ss",
+                 exit_vk, args.locked_test_seconds)
+        root.after(int(args.locked_test_seconds * 1000), lambda: shutdown("locked_test_timeout"))
+
+        def poll_exit_key():
+            if not state["running"]:
+                return
+            if exit_requested.is_set():
+                shutdown("exit_key")
+                return
+            root.after(150, poll_exit_key)
+
+        root.after(150, poll_exit_key)
     else:
         root.after(500, check_watchdog)
 
@@ -367,8 +476,9 @@ if __name__ == "__main__":
         sys.exit(main())
     except SystemExit:
         raise
-    except BaseException:
+    except BaseException as e:
         # Any uncaught error must be logged (we run headless under pythonw) so the
         # crash is diagnosable; the agent's watchdog still restores guest input.
         log.exception("overlay crashed (uncaught)")
+        _emit_fatal(f"overlay crashed (uncaught): {e}")
         sys.exit(1)
