@@ -1,4 +1,17 @@
-node_modules/ 
-dist/ 
-dist-electron/ 
-__MACOSX/ 
+node_modules/
+dist/
+dist-electron/
+__MACOSX/
+
+# Secrets — never commit real env files (commit the *.example versions instead)
+.env
+.env.*
+!.env.example
+server/.env
+server/.env.*
+!server/.env.example
+
+# Python build artifacts / logs
+__pycache__/
+*.pyc
+agent/pc-agent/python/agent.log
