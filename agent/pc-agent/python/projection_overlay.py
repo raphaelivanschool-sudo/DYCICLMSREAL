@@ -24,12 +24,25 @@ overlay still covers the screen but underlying input may not be fully swallowed.
 import argparse
 import ctypes
 import io
+import logging
 import os
 import sys
+import tempfile
 import threading
 import time
 
 IS_WINDOWS = sys.platform.startswith("win")
+
+# Log to a file the agent/operator can inspect — the Node agent spawns this with
+# no console, so a crash would otherwise be invisible. The agent also surfaces a
+# clear "overlay keeps crashing" error to the dashboard pointing here.
+LOG_PATH = os.path.join(tempfile.gettempdir(), "dyci_projection_overlay.log")
+logging.basicConfig(
+    filename=LOG_PATH,
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+log = logging.getLogger("projection_overlay")
 
 
 # --------------------------------------------------------------------------- #
@@ -61,13 +74,26 @@ class InputBlocker:
 
     def _run(self):
         try:
+            import ctypes.wintypes as wt
+
             user32 = ctypes.windll.user32
             kernel32 = ctypes.windll.kernel32
 
             LRESULT = ctypes.c_ssize_t
-            HOOKPROC = ctypes.CFUNCTYPE(
-                LRESULT, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p
-            )
+            HOOKPROC = ctypes.CFUNCTYPE(LRESULT, ctypes.c_int, wt.WPARAM, wt.LPARAM)
+
+            # Pointer-sized argtypes/restypes are essential on 64-bit: without them
+            # ctypes assumes c_int and truncates HHOOK/HMODULE handles, which makes
+            # SetWindowsHookEx silently fail (no input lock).
+            user32.SetWindowsHookExW.restype = ctypes.c_void_p
+            user32.SetWindowsHookExW.argtypes = [ctypes.c_int, HOOKPROC, ctypes.c_void_p, wt.DWORD]
+            user32.CallNextHookEx.restype = LRESULT
+            user32.CallNextHookEx.argtypes = [ctypes.c_void_p, ctypes.c_int, wt.WPARAM, wt.LPARAM]
+            user32.UnhookWindowsHookEx.restype = wt.BOOL
+            user32.UnhookWindowsHookEx.argtypes = [ctypes.c_void_p]
+            kernel32.GetModuleHandleW.restype = ctypes.c_void_p
+            kernel32.GetModuleHandleW.argtypes = [wt.LPCWSTR]
+            kernel32.GetCurrentThreadId.restype = wt.DWORD
 
             def _make_proc(hook_ref):
                 def _proc(nCode, wParam, lParam):
@@ -86,29 +112,27 @@ class InputBlocker:
             hmod = kernel32.GetModuleHandleW(None)
             self._thread_id = kernel32.GetCurrentThreadId()
 
-            self._kb_hook = user32.SetWindowsHookExW(
-                self.WH_KEYBOARD_LL, self._kb_proc, hmod, 0
-            )
+            self._kb_hook = user32.SetWindowsHookExW(self.WH_KEYBOARD_LL, self._kb_proc, hmod, 0)
             kb_ref[0] = self._kb_hook
-            self._mouse_hook = user32.SetWindowsHookExW(
-                self.WH_MOUSE_LL, self._mouse_proc, hmod, 0
-            )
+            self._mouse_hook = user32.SetWindowsHookExW(self.WH_MOUSE_LL, self._mouse_proc, hmod, 0)
             mouse_ref[0] = self._mouse_hook
 
             if not self._kb_hook or not self._mouse_hook:
-                self.error = "SetWindowsHookEx failed (try running the agent as Administrator)"
+                self.error = "SetWindowsHookEx failed (run the agent as Administrator for full input lock)"
+                log.error(self.error)
                 return
 
             self.active = True
+            log.info("global input lock engaged")
 
             # Pump messages so the low-level hooks fire. Exits on WM_QUIT.
-            import ctypes.wintypes as wt
             msg = wt.MSG()
             while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
                 user32.TranslateMessage(ctypes.byref(msg))
                 user32.DispatchMessageW(ctypes.byref(msg))
         except Exception as e:  # pragma: no cover - platform specific
             self.error = f"input blocker error: {e}"
+            log.exception("input blocker crashed")
         finally:
             self._unhook()
 
@@ -172,11 +196,14 @@ def main():
     )
     args = parser.parse_args()
 
+    log.info("overlay starting (session=%s, frame=%s)", args.session, args.frame)
     try:
         import tkinter as tk
         from PIL import Image, ImageTk
     except Exception as e:  # pragma: no cover
-        sys.stderr.write(f"projection_overlay: required UI libs missing: {e}\n")
+        msg = f"required UI libs missing (need Pillow + tkinter): {e}"
+        sys.stderr.write(f"projection_overlay: {msg}\n")
+        log.error(msg)
         return 2
 
     # Mark DPI awareness so geometry matches physical pixels on Windows.
@@ -318,4 +345,12 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except BaseException:
+        # Any uncaught error must be logged (we run headless under pythonw) so the
+        # crash is diagnosable; the agent's watchdog still restores guest input.
+        log.exception("overlay crashed (uncaught)")
+        sys.exit(1)

@@ -21,6 +21,15 @@ import psutil
 from flask import Flask, Response, jsonify, request
 from PIL import Image, ImageGrab
 
+# mss is the preferred, most reliable cross-monitor grabber; PIL ImageGrab is the
+# fallback so capture still works if mss isn't installed on the guest.
+try:
+    import mss as _mss
+except Exception:  # pragma: no cover - optional dependency
+    _mss = None
+
+_CAPTURE_LOG = logging.getLogger("agent.capture")
+
 
 AGENT_VERSION = "1.0"
 
@@ -154,6 +163,31 @@ def _resize_to_fit(img: Image.Image, max_w: int, max_h: int) -> Image.Image:
     return img.resize(new_size, Image.Resampling.LANCZOS)
 
 
+def _capture_rgb_image() -> Image.Image:
+    """
+    Grab the full (multi-monitor) desktop as an RGB PIL image.
+
+    Capture fallback chain (so a single backend failure degrades gracefully):
+      1. mss (fast, reliable across monitors) — preferred
+      2. PIL ImageGrab(all_screens=True) — fallback
+    """
+    errors = []
+    if _mss is not None:
+        try:
+            with _mss.mss() as sct:
+                monitor = sct.monitors[0]  # virtual screen spanning all monitors
+                shot = sct.grab(monitor)
+                return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+        except Exception as e:  # fall through to PIL
+            errors.append(f"mss: {e}")
+            _CAPTURE_LOG.warning("mss capture failed, falling back to ImageGrab: %s", e)
+    try:
+        return ImageGrab.grab(all_screens=True).convert("RGB")
+    except Exception as e:
+        errors.append(f"ImageGrab: {e}")
+        raise RuntimeError("All screenshot backends failed -> " + " | ".join(errors))
+
+
 def capture_screenshot_jpeg(
     quality: int,
     max_w: int,
@@ -169,8 +203,7 @@ def capture_screenshot_jpeg(
 
     def _work() -> None:
         try:
-            img = ImageGrab.grab(all_screens=True)
-            img = img.convert("RGB")
+            img = _capture_rgb_image()
             img = _resize_to_fit(img, max_w=max_w, max_h=max_h)
             buf = io.BytesIO()
             q = max(1, min(int(quality), 95))

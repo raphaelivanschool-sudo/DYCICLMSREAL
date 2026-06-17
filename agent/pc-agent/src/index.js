@@ -7,8 +7,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import dgram from 'dgram';
-import screenshot from 'screenshot-desktop';
-import { spawn, exec } from 'child_process';
+import { spawn, exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import { runPythonDiscovery } from './pythonDiscovery.js';
 
@@ -745,20 +744,55 @@ class PCAgent {
 
   async takeScreenshot() {
     this.logger.info('Taking screenshot...');
+    // Capture via PowerShell + .NET (CopyFromScreen) — no external .exe, avoiding
+    // the fragile screenshot-desktop bat/exe. Primary screenshot path is the
+    // Python agent over HTTP 5555; this is the Socket.IO fallback.
+    if (process.platform !== 'win32') {
+      throw new Error('Screenshot capture is only implemented for Windows guests');
+    }
+    const stamp = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const outPath = path.join(os.tmpdir(), `dyci_shot_${stamp}.jpg`);
+    const ps1Path = path.join(os.tmpdir(), `dyci_shot_${stamp}.ps1`);
+    const outEsc = outPath.replace(/\\/g, '\\\\');
+    const script = `
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+$bmp = New-Object System.Drawing.Bitmap($b.Width, $b.Height)
+$g = [System.Drawing.Graphics]::FromImage($bmp)
+$g.CopyFromScreen($b.X, $b.Y, 0, 0, $bmp.Size)
+$enc = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' } | Select-Object -First 1
+$ep = New-Object System.Drawing.Imaging.EncoderParameters(1)
+$ep.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, [long]70)
+$bmp.Save('${outEsc}', $enc, $ep)
+$g.Dispose(); $bmp.Dispose()
+`;
     try {
-      const buffer = await screenshot();
-      if (!buffer || buffer.length === 0) {
+      await fs.promises.writeFile(ps1Path, script, 'utf8');
+      await new Promise((resolve, reject) => {
+        execFile(
+          'powershell.exe',
+          ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ps1Path],
+          { windowsHide: true, timeout: 15000 },
+          (err, _stdout, stderr) => (err ? reject(new Error((stderr || err.message || '').trim())) : resolve()),
+        );
+      });
+      const buf = await fs.promises.readFile(outPath);
+      if (!buf || buf.length === 0) {
         throw new Error('Empty screenshot buffer');
       }
-      const base64 = Buffer.from(buffer).toString('base64');
       return {
         success: true,
-        screenshot: base64,
-        format: 'png',
+        screenshot: Buffer.from(buf).toString('base64'),
+        format: 'jpeg',
         timestamp: new Date().toISOString(),
       };
     } catch (error) {
       throw new Error('Failed to take screenshot: ' + error.message);
+    } finally {
+      fs.promises.unlink(outPath).catch(() => {});
+      fs.promises.unlink(ps1Path).catch(() => {});
     }
   }
 

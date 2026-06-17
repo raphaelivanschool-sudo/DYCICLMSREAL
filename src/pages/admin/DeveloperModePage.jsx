@@ -271,22 +271,45 @@ function DeveloperModePage() {
         return;
       }
       lastScreenshotRequestRef.current = { silent };
-      pendingScreenshotCommandRef.current = true;
       if (!silent) {
         setScreenshotFetching(true);
         setScreenshotStatus('Fetching screenshot...');
       }
+
+      // Primary: pull a live JPEG from the guest's Python agent over HTTP (5555).
+      try {
+        const res = await agentsApi.getScreenshot(agentId, { ip, mac });
+        const data = res?.data;
+        if (data?.success && data.screenshot) {
+          const fmt = (data.format || 'jpeg').toLowerCase();
+          const mime = fmt === 'png' ? 'image/png' : 'image/jpeg';
+          setScreenshotUrl(`data:${mime};base64,${data.screenshot}`);
+          setScreenshotFetching(false);
+          if (data.resolvedComputerId) commandTargetComputerIdRef.current = data.resolvedComputerId;
+          const t = new Date().toLocaleTimeString();
+          const host = selectedDisplayRef.current.host;
+          setScreenshotStatus(`${silent ? 'Live' : '✓ Screenshot updated'} — ${host} — Last updated: ${t}`);
+          return;
+        }
+      } catch (error) {
+        console.warn(
+          '[Screenshot] HTTP path failed, falling back to agent command:',
+          error?.response?.data?.error || error?.message,
+        );
+      }
+
+      // Fallback: ask the Node agent to capture (PowerShell .NET) via Socket.IO;
+      // the result arrives asynchronously on the agent_command_result event.
+      pendingScreenshotCommandRef.current = true;
       try {
         const res = await agentsApi.sendCommand(agentId, 'screenshot', {}, { ip, mac });
         const rid = res?.data?.resolvedComputerId;
-        if (rid) {
-          commandTargetComputerIdRef.current = rid;
-        }
+        if (rid) commandTargetComputerIdRef.current = rid;
       } catch (error) {
         pendingScreenshotCommandRef.current = false;
         setScreenshotFetching(false);
         if (!silent) {
-          const msg = error.response?.data?.error || error.message || 'Could not send screenshot command';
+          const msg = error.response?.data?.error || error.message || 'Could not capture screenshot';
           setScreenshotStatus(`✗ Error: ${msg}`);
         }
       }

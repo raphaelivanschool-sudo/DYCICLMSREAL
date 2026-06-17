@@ -137,6 +137,15 @@ export const agentsApi = {
     return api.post("/api/agents/command", body);
   },
 
+  // Live screenshot via the guest Python agent (HTTP 5555). Returns base64 JPEG.
+  getScreenshot: (computerId, meta = {}) => {
+    const body = {};
+    if (computerId) body.computerId = computerId;
+    if (meta.ip) body.ip = meta.ip;
+    if (meta.mac) body.mac = meta.mac;
+    return api.post("/api/agents/screenshot", body);
+  },
+
   // Generate agent installer
   createInstaller: (room, serverUrl, computerName) =>
     api.post("/api/agents/installer", { room, serverUrl, computerName }),

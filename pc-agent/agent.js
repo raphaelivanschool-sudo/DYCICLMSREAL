@@ -1,8 +1,7 @@
 const io = require('socket.io-client');
 const si = require('systeminformation');
-const screenshotDesktop = require('screenshot-desktop');
 const os = require('os');
-const { exec, spawn } = require('child_process');
+const { exec, execFile, spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs').promises;
 const fsSync = require('fs');
@@ -24,12 +23,20 @@ const projection = {
   active: false,
   sessionId: null,
   overlayProc: null,
+  overlayScript: null,
+  pythonCmd: null,
   lastSeq: -1,
   lastActivity: 0,        // epoch ms of last frame OR ping
   watchdogSeconds: 8,
   watchdogTimer: null,
   stopping: false,
+  relaunchCount: 0,
+  lastSpawnAt: 0,
 };
+
+// Resolved once: the first Python launcher on the guest that actually runs.
+let cachedPythonCmd = null;
+let pythonProbed = false;
 
 function normalizeServerUrl(url) {
   let s = String(url || '').trim().replace(/\/+$/, '');
@@ -710,19 +717,56 @@ async function enableWifiAdapter(preferredAdapterName) {
   };
 }
 
-/** Capture desktop as PNG for dashboard screen preview (matches agent/pc-agent contract). */
+/**
+ * Capture the guest desktop via PowerShell + .NET (System.Drawing.CopyFromScreen).
+ * This is the Socket.IO *fallback* path — the primary screenshot path is the
+ * Python agent over HTTP 5555. Uses no external .exe, so it avoids the fragile
+ * screenshot-desktop bat/exe that breaks when its companion exe is missing.
+ */
 async function takeScreenshot() {
-  const imgBuffer = await screenshotDesktop();
-  if (!imgBuffer || !imgBuffer.length) {
-    throw new Error('Empty screenshot capture');
+  if (process.platform !== 'win32') {
+    throw new Error('Screenshot capture is only implemented for Windows guests');
   }
-  const base64 = Buffer.from(imgBuffer).toString('base64');
-  return {
-    success: true,
-    screenshot: base64,
-    format: 'png',
-    timestamp: new Date().toISOString(),
-  };
+  const stamp = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  const outPath = path.join(os.tmpdir(), `dyci_shot_${stamp}.jpg`);
+  const ps1Path = path.join(os.tmpdir(), `dyci_shot_${stamp}.ps1`);
+  const outEsc = outPath.replace(/\\/g, '\\\\');
+  const script = `
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+$bmp = New-Object System.Drawing.Bitmap($b.Width, $b.Height)
+$g = [System.Drawing.Graphics]::FromImage($bmp)
+$g.CopyFromScreen($b.X, $b.Y, 0, 0, $bmp.Size)
+$enc = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' } | Select-Object -First 1
+$ep = New-Object System.Drawing.Imaging.EncoderParameters(1)
+$ep.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, [long]70)
+$bmp.Save('${outEsc}', $enc, $ep)
+$g.Dispose(); $bmp.Dispose()
+`;
+  await fs.writeFile(ps1Path, script, 'utf8');
+  try {
+    await new Promise((resolve, reject) => {
+      execFile(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ps1Path],
+        { windowsHide: true, timeout: 15000 },
+        (err, _stdout, stderr) => (err ? reject(new Error((stderr || err.message || '').trim())) : resolve()),
+      );
+    });
+    const buf = await fs.readFile(outPath);
+    if (!buf || !buf.length) throw new Error('Empty screenshot capture');
+    return {
+      success: true,
+      screenshot: buf.toString('base64'),
+      format: 'jpeg',
+      timestamp: new Date().toISOString(),
+    };
+  } finally {
+    fs.unlink(outPath).catch(() => {});
+    fs.unlink(ps1Path).catch(() => {});
+  }
 }
 
 // ---- Locked overlay subprocess management ----
@@ -754,11 +798,37 @@ function resolveOverlayScript() {
   return null;
 }
 
-/** Pick a Python launcher that hides the console window when possible. */
-function resolvePythonCommand() {
-  if (process.env.PROJECTION_PYTHON) return process.env.PROJECTION_PYTHON;
-  if (process.platform === 'win32') return 'pythonw.exe';
-  return 'python3';
+/** Candidate Python launchers to try (prefer no-console `pythonw` on Windows). */
+function pythonCandidates() {
+  if (process.env.PROJECTION_PYTHON) return [process.env.PROJECTION_PYTHON];
+  return process.platform === 'win32'
+    ? ['pythonw.exe', 'python.exe', 'py']
+    : ['python3', 'python'];
+}
+
+/** Probe once for a Python launcher that actually runs on this guest; cache it. */
+function resolvePython() {
+  if (pythonProbed) return Promise.resolve(cachedPythonCmd);
+  const candidates = pythonCandidates();
+  const tryOne = (i) =>
+    new Promise((resolve) => {
+      if (i >= candidates.length) {
+        pythonProbed = true;
+        resolve(null);
+        return;
+      }
+      const py = candidates[i];
+      execFile(py, ['--version'], { timeout: 5000, windowsHide: true }, (err) => {
+        if (!err) {
+          cachedPythonCmd = py;
+          pythonProbed = true;
+          resolve(py);
+        } else {
+          resolve(tryOne(i + 1));
+        }
+      });
+    });
+  return tryOne(0);
 }
 
 /** Touch/refresh the heartbeat file the overlay watchdog reads. */
@@ -771,44 +841,82 @@ async function touchProjectionHeartbeat() {
   }
 }
 
-/** Spawn the locked Python overlay for the given session. */
-function spawnOverlay() {
-  const script = resolveOverlayScript();
-  if (!script) {
-    throw new Error(
-      'projection_overlay.py not found. Set PROJECTION_OVERLAY_PATH or place it beside the agent.',
-    );
+/** Fatal overlay failure: report a clear error to the dashboard and restore the guest. */
+function onOverlayFatal(detail) {
+  console.error('[Projection] FATAL:', detail);
+  projection.stopping = true;
+  projection.active = false;
+  if (projection.watchdogTimer) {
+    clearInterval(projection.watchdogTimer);
+    projection.watchdogTimer = null;
   }
-  const py = resolvePythonCommand();
+  const proc = projection.overlayProc;
+  projection.overlayProc = null;
+  if (proc) { try { proc.kill(); } catch { /* ignore */ } }
+  fs.unlink(PROJECTION_HEARTBEAT_PATH).catch(() => {});
+  fs.unlink(PROJECTION_FRAME_PATH).catch(() => {});
+  // Leave the dashboard showing the error reason (no follow-up 'stopped' ack).
+  sendProjectionAck('error', detail);
+  projection.sessionId = null;
+  projection.stopping = false;
+}
+
+/** Spawn the locked Python overlay process (uses the resolved launcher + script). */
+function spawnOverlayProc() {
   const args = [
-    script,
+    projection.overlayScript,
     '--frame', PROJECTION_FRAME_PATH,
     '--heartbeat', PROJECTION_HEARTBEAT_PATH,
     '--watchdog', String(projection.watchdogSeconds),
     '--session', projection.sessionId || '',
   ];
-  const proc = spawn(py, args, { detached: false, stdio: 'ignore', windowsHide: true });
-  proc.on('exit', (code) => {
-    console.log(`[Projection] Overlay exited (code ${code})`);
+  let proc;
+  try {
+    proc = spawn(projection.pythonCmd, args, {
+      detached: false,
+      stdio: ['ignore', 'ignore', 'pipe'],
+      windowsHide: true,
+    });
+  } catch (err) {
+    onOverlayFatal(`Failed to spawn overlay (${projection.pythonCmd}): ${err.message}`);
+    return;
+  }
+  projection.overlayProc = proc;
+  projection.lastSpawnAt = Date.now();
+
+  proc.on('spawn', () => console.log(`[Projection] Overlay launched via ${projection.pythonCmd} (PID ${proc.pid})`));
+  if (proc.stderr) {
+    proc.stderr.on('data', (d) => {
+      const line = String(d).trim();
+      if (line) console.error('[Overlay]', line);
+    });
+  }
+  proc.on('error', (err) => {
     if (projection.overlayProc === proc) projection.overlayProc = null;
-    // Supervisor: if the overlay died mid-session (not during teardown), relaunch.
-    if (projection.active && !projection.stopping) {
-      try {
-        projection.overlayProc = spawnOverlay();
-        console.log('[Projection] Overlay relaunched by supervisor');
-      } catch (err) {
-        console.error('[Projection] relaunch failed:', err.message);
-        sendProjectionAck('error', `Overlay crashed and relaunch failed: ${err.message}`);
-      }
-    }
+    onOverlayFatal(`Overlay process error (${projection.pythonCmd}): ${err.message}`);
   });
-  return proc;
+  proc.on('exit', (code, signal) => {
+    if (projection.overlayProc === proc) projection.overlayProc = null;
+    console.log(`[Projection] Overlay exited (code=${code} signal=${signal || '-'})`);
+    if (!projection.active || projection.stopping) return;
+    // Crash-loop guard: relaunch, but give up after repeated rapid failures.
+    const now = Date.now();
+    if (now - projection.lastSpawnAt < 3000) projection.relaunchCount += 1;
+    else projection.relaunchCount = 0;
+    if (projection.relaunchCount >= 3) {
+      onOverlayFatal('Overlay keeps crashing on the guest. See %TEMP%\\dyci_projection_overlay.log for details (check Pillow is installed and the agent is elevated).');
+      return;
+    }
+    console.log('[Projection] supervisor relaunching overlay…');
+    spawnOverlayProc();
+  });
 }
 
 /** Start a locked projection session on this guest. */
 async function startProjection(data) {
   const sessionId = data.session_id || `local-${Date.now()}`;
   const watchdog = parseInt(data.watchdog_seconds, 10);
+  console.log(`[Projection] START received (session=${sessionId})`);
   // Already projecting this session → re-ack and continue (idempotent late-joiner resend).
   if (projection.active && projection.sessionId === sessionId) {
     sendProjectionAck('projecting', 'Already active');
@@ -817,18 +925,38 @@ async function startProjection(data) {
   // Different session active → swap to the new one cleanly.
   if (projection.active) await stopProjection('superseded');
 
+  // Resolve the overlay script + a working Python launcher up front so failures
+  // surface as a clear dashboard error instead of a stuck "connecting" badge.
+  const script = resolveOverlayScript();
+  if (!script) {
+    onOverlayFatal(
+      'projection_overlay.py not found on guest. Set PROJECTION_OVERLAY_PATH or deploy it beside the agent.',
+    );
+    return;
+  }
+  const py = await resolvePython();
+  if (!py) {
+    onOverlayFatal(
+      `No working Python found on guest (tried: ${pythonCandidates().join(', ')}). Install Python 3 + Pillow.`,
+    );
+    return;
+  }
+
   projection.active = true;
   projection.stopping = false;
   projection.sessionId = sessionId;
+  projection.overlayScript = script;
+  projection.pythonCmd = py;
   projection.lastSeq = -1;
+  projection.relaunchCount = 0;
   projection.watchdogSeconds = Number.isFinite(watchdog) ? watchdog : 8;
 
   // Clear any stale frame so the overlay shows the "presenting…" placeholder first.
   try { await fs.unlink(PROJECTION_FRAME_PATH); } catch { /* ignore */ }
   await touchProjectionHeartbeat();
 
-  projection.overlayProc = spawnOverlay();
-  console.log('[Projection] Overlay started PID:', projection.overlayProc.pid);
+  spawnOverlayProc();
+  if (!projection.active) return; // spawn failed → onOverlayFatal already reported
 
   // Node-side watchdog: if no frame/ping arrives within the window, fail open.
   if (projection.watchdogTimer) clearInterval(projection.watchdogTimer);

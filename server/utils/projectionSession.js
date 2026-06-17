@@ -175,6 +175,12 @@ class ProjectionSessionManager {
       targets: targetMap,
     };
 
+    const onlineCount = [...targetMap.values()].filter((t) => t.state === GUEST.CONNECTING).length;
+    console.log(
+      `[Projection] start session=${sessionId} host=${host.userId} ` +
+        `targets=${targets === "all" ? "all" : "selected"} online=${onlineCount}/${targetMap.size}`,
+    );
+
     // Fan out PROJECT_START to every online target.
     for (const t of targetMap.values()) {
       if (t.state === GUEST.CONNECTING) this._sendStart(t.id);
@@ -192,6 +198,7 @@ class ProjectionSessionManager {
   _sendStart(computerId) {
     if (!this.session) return;
     const s = this.session;
+    console.log(`[Projection] -> projection_start to computer_${computerId} (session ${s.sessionId})`);
     this.io.to(`computer_${computerId}`).emit("projection_start", {
       session_id: s.sessionId,
       fps: s.fps,
@@ -253,6 +260,7 @@ class ProjectionSessionManager {
     if (!id) return;
     const t = s.targets.get(id);
     if (!t) return;
+    console.log(`[Projection] <- ack from computer_${id}: ${state}${detail ? ` (${detail})` : ""}`);
     if (state === "projecting") t.state = GUEST.PROJECTING;
     else if (state === "stopped") t.state = GUEST.STOPPED;
     else if (state === "error") {

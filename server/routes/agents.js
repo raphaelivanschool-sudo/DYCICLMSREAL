@@ -1,9 +1,14 @@
 import { Router } from 'express';
 import { PrismaClient } from '@prisma/client';
 import dgram from 'dgram';
+import axios from 'axios';
 import { authenticateToken } from '../middleware/auth.js';
-import { pickAgentTargetId } from '../utils/agentLookup.js';
+import { pickAgentTargetId, resolveLanIpForPcAgent } from '../utils/agentLookup.js';
 import { projectionManager } from '../utils/projectionSession.js';
+import {
+  getPcAgentApiKey,
+  getPcAgentConfigPathTried,
+} from '../utils/pcAgentAuth.js';
 import {
   recordActivity,
   clientIp,
@@ -12,6 +17,7 @@ import {
 
 const router = Router();
 const prisma = new PrismaClient();
+const PC_AGENT_PORT = parseInt(process.env.PC_AGENT_HTTP_PORT || '5555', 10);
 
 // Helper to create WoL magic packet
 function createMagicPacket(mac) {
@@ -327,6 +333,84 @@ router.post('/command', authenticateToken, async (req, res) => {
   }
 });
 
+
+/**
+ * Live screenshot of a guest — primary capture path.
+ *
+ * Fetches the JPEG from the guest's Python agent (Flask on TCP 5555, mss/Pillow)
+ * using the shared api_key. This replaces the fragile screenshot-desktop
+ * (.bat/.exe) backend in the Node agent, which remains only as a socket fallback.
+ */
+router.post('/screenshot', authenticateToken, async (req, res) => {
+  try {
+    const apiKey = getPcAgentApiKey();
+    if (!apiKey) {
+      return res.status(503).json({
+        success: false,
+        error:
+          `Screenshot unavailable: Python agent api_key not configured. Set PC_AGENT_API_KEY in server/.env ` +
+          `or sync agent_config.json (see ${getPcAgentConfigPathTried()}).`,
+      });
+    }
+
+    const connectedComputers = req.app.get('connectedComputers');
+    const { computerId, ip, mac } = req.body || {};
+    const { targetId, strategy } = pickAgentTargetId(connectedComputers, { computerId, ip, mac });
+    if (!targetId) {
+      return res.status(404).json({
+        success: false,
+        error: 'No online agent matches this PC. Ensure the DYCI agent is running and connected.',
+      });
+    }
+
+    const lanIp = resolveLanIpForPcAgent(connectedComputers, targetId, ip);
+    if (!lanIp) {
+      return res.status(400).json({ success: false, error: 'Could not resolve the guest agent LAN IP.' });
+    }
+
+    const url = `http://${lanIp}:${PC_AGENT_PORT}/screenshot`;
+    let guestResp;
+    try {
+      guestResp = await axios.get(url, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        timeout: 12000,
+        validateStatus: () => true,
+      });
+    } catch (e) {
+      const msg =
+        e.code === 'ECONNREFUSED' || e.code === 'ETIMEDOUT' || e.code === 'EHOSTUNREACH'
+          ? `Could not reach the Python agent at ${lanIp}:${PC_AGENT_PORT}. Confirm it is running and that the guest firewall allows TCP ${PC_AGENT_PORT} on the LAN.`
+          : e.message || 'Screenshot request failed';
+      return res.status(502).json({ success: false, error: msg });
+    }
+
+    if (guestResp.status === 401 || guestResp.status === 403) {
+      return res.status(guestResp.status).json({
+        success: false,
+        error: 'Guest agent rejected the api_key — it must match the server (PC_AGENT_API_KEY / agent_config.json).',
+      });
+    }
+    if (guestResp.status !== 200 || !guestResp.data?.screenshot) {
+      const detail =
+        (typeof guestResp.data === 'object' && guestResp.data?.error) ||
+        guestResp.statusText ||
+        String(guestResp.status);
+      return res.status(502).json({ success: false, error: `Guest agent screenshot failed: ${detail}` });
+    }
+
+    return res.json({
+      success: true,
+      screenshot: guestResp.data.screenshot,
+      format: guestResp.data.format || 'jpeg',
+      timestamp: guestResp.data.timestamp || new Date().toISOString(),
+      resolvedComputerId: targetId,
+      resolutionStrategy: strategy,
+    });
+  } catch (error) {
+    console.error('[agents/screenshot]', error);
+    res.status(500).json({ success: false, error: 'Screenshot failed (server error)' });
+  }
+});
 
 // ---- Locked Demo Mode: projection REST fallbacks (socket path is primary) ----
 // These mirror the Socket.IO projection:* events for clients that cannot use
