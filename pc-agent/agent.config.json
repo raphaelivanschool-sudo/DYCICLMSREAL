@@ -1,0 +1,9 @@
+{
+  "active": "lab",
+  "computerId": "lab-pc-01",
+  "knownServers": {
+    "lab": "172.24.112.1:3001",
+    "office": "192.168.1.138:3001",
+    "local": "localhost:3001"
+  }
+}

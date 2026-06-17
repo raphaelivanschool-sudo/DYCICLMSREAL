@@ -129,6 +129,109 @@ VITE_SOCKET_URL="http://localhost:3001"
 DATABASE_URL="mysql://root:@localhost:3306/labmanagement"
 ```
 
+## Screen Projection (Locked Demo Mode)
+
+Broadcast an instructor/admin's screen to one, several, or **all** online lab PCs.
+On each targeted guest the screen appears in a **fullscreen, always-on-top,
+input-locked overlay** the student cannot close, minimize, or alt-tab out of. It
+ends only when the host clicks **Stop**, the host disconnects, or a safety
+watchdog fires — and input is always restored.
+
+### How it works (data flow)
+
+```
+Browser host (getDisplayMedia)  ->  Server (Socket.IO session manager)  ->  Guest Node agent  ->  Python locked overlay
+   projection:start/frame/ping        fans out projection_start/frame/        projection_overlay.py (global
+   projection:status (per-guest)      ping/stop to each computer_<id>          keyboard+mouse hooks, watchdog)
+```
+
+The server is the single authority: the browser talks only to the server, the
+server relays to guest agents over the existing Socket.IO channel (no extra
+ports). Frames are JPEG; the agent renders newest-frame-wins and drops stale ones.
+
+### Using it
+
+1. Open **Admin -> Developer Mode** (PC Discovery panel).
+2. **Project to all online agents**, or tick rows and **Project to selected**, or
+   use the per-row **Project** button. Pick a window/screen when the browser asks.
+3. Watch per-guest badges (`connecting` -> `projecting`, or `error`/`offline`) and
+   the red session banner. Click the big red **Stop projection** to end it everywhere.
+4. **Advanced** lets you tune FPS (5-20), JPEG quality (30-85), and max width.
+
+### Guest requirements
+
+- Both the **Node agent** (`pc-agent/agent.js`) and the **Python agent**
+  (`agent/pc-agent/python/`) run on each lab PC. The Node agent spawns
+  `projection_overlay.py` (needs `Pillow` + Python 3 / Tkinter, already in
+  `requirements_agent.txt`).
+- **Run the agent elevated (Administrator).** Full keyboard/mouse lockdown uses
+  Windows low-level hooks that only fully work when elevated. Without elevation
+  the overlay still covers the screen but underlying input may not be swallowed.
+- **Ctrl+Alt+Del** (Secure Attention Sequence) **cannot** be blocked from user
+  space — this is a Windows platform limitation, not a bug.
+
+### Ports
+
+- Projection rides the existing agent **Socket.IO** connection to the server
+  (default port **3001**). No inbound ports are opened on guests.
+- The Python agent's HTTP API (screenshots, etc.) still listens on **5555**.
+
+### Tunables (server environment, in `server/.env`)
+
+| Variable | Default | Range | Purpose |
+|----------|---------|-------|---------|
+| `PROJECTION_FPS` | 12 | 5-20 | Target capture/broadcast frame rate |
+| `PROJECTION_JPEG_QUALITY` | 60 | 30-85 | JPEG quality (bandwidth vs. clarity) |
+| `PROJECTION_MAX_WIDTH` | 1280 | — | Max frame width (preserves aspect) |
+| `PROJECTION_WATCHDOG_SECONDS` | 8 | 3-60 | Guest auto-teardown if no frame/ping |
+| `PROJECTION_RESEND_TO_LATE_JOINERS` | true | — | Resync agents that connect mid-broadcast (for "all") |
+
+Guest-agent overrides (env or `pc-agent/agent.config.json`): `PROJECTION_OVERLAY_PATH`
+(path to `projection_overlay.py`), `PROJECTION_PYTHON` (python launcher, default
+`pythonw.exe` on Windows).
+
+### Safety / fail-open
+
+A guest is **never left permanently locked**: if the agent loses the server, or
+no frame/ping arrives within `PROJECTION_WATCHDOG_SECONDS`, or the host tab/process
+dies, the overlay tears down and input is restored. Stop is idempotent and always wins.
+
+### Manual QA checklist (run on a Windows guest, e.g. `acer / 26.191.85.125`)
+
+Setup: start the server (`npm run server:dev`) and the web app (`npm run dev`).
+On the guest PC, run **both** agents **as Administrator** (elevation is required
+for full input lock):
+
+```powershell
+# Node agent (Socket.IO) — point it at the server
+node pc-agent\agent.js --server http://<SERVER_IP>:3001
+# Python agent (screenshots) in another elevated terminal
+python agent\pc-agent\python\agent.py
+```
+
+Then verify, from **Admin → Developer Mode**:
+
+1. **Project to all** — overlay appears on the guest within ~2s, fullscreen across
+   all monitors, on top of the taskbar; dashboard badge shows `projecting`.
+2. **Locked** — on the guest, try Esc, Alt+Tab, Alt+F4, Win key, mouse clicks:
+   none escape the overlay. (Ctrl+Alt+Del is expected to still work — documented.)
+3. **Frames** — moving a window on the host appears on the guest smoothly.
+4. **Stop** — click the red **Stop projection**: overlay vanishes instantly and the
+   guest keyboard/mouse work again.
+5. **Project to selected** — tick ≥1 row, **Project to selected**: only those guests lock.
+6. **Per-row Project** — the row's 🖥️ Project button locks just that PC.
+7. **Host tab close** — start projecting, then close the browser tab: the guest
+   auto-unlocks within a couple seconds (server detected host disconnect).
+8. **Watchdog** — while projecting, pull the guest's network (or stop the server):
+   the overlay tears down and input is restored within `PROJECTION_WATCHDOG_SECONDS` (~8s).
+9. **Late joiner** — start **Project to all**, then start a new agent: it receives
+   the stream and locks too.
+10. **Regression** — confirm **Lock**, **Shutdown**, **Refresh screenshot**, and
+    **Scan Network** still work as before.
+
+If full input lock does not engage, confirm the agent is running **elevated**; the
+dashboard badge will read `error: SetWindowsHookEx failed …` when it is not.
+
 ## Features
 
 - **User Management**: Admin, Instructor, and Student roles

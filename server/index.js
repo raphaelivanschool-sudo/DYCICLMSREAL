@@ -9,6 +9,8 @@ import { PrismaClient } from "@prisma/client";
 import jwt from "jsonwebtoken";
 import dgram from "dgram";
 import os from "os";
+import { projectionManager } from "./utils/projectionSession.js";
+import { recordActivity } from "./utils/activityLog.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -41,6 +43,9 @@ const connectedUsers = new Map();
 
 // Store connected PC agents
 const connectedComputers = new Map();
+
+// Bind the projection session manager to live Socket.IO + agent registry.
+projectionManager.attach({ io, connectedComputers });
 
 // Store discovered services via UDP broadcast (TightVNC service discovery)
 const discoveredServices = new Map();
@@ -195,6 +200,19 @@ io.on("connection", (socket) => {
       
       // Acknowledge registration
       socket.emit("agent_registered", { success: true });
+
+      // Late joiner: if a projection is active, resync this agent (broadcast sessions).
+      projectionManager.onAgentRegister(computerData.id);
+    });
+
+    // PC Agent: projection acknowledgements / heartbeat replies.
+    socket.on("projection_ack", (data) => {
+      const { session_id, state, detail } = data || {};
+      projectionManager.ack({ socketId: socket.id, sessionId: session_id, state, detail });
+    });
+    socket.on("projection_pong", (data) => {
+      const { session_id } = data || {};
+      projectionManager.pong({ socketId: socket.id, sessionId: session_id });
     });
 
     // PC Agent: Handle status updates
@@ -264,7 +282,10 @@ io.on("connection", (socket) => {
         if (computer.socketId === socket.id) {
           console.log(`[Agent] Disconnected: ${computer.computer.name}`);
           connectedComputers.delete(computerId);
-          
+
+          // If this guest was in a projection, mark it offline (others continue).
+          projectionManager.onAgentDisconnect(computerId);
+
           // Broadcast computer offline status
           socket.broadcast.emit("computer_offline", {
             computerId: computerId,
@@ -310,6 +331,60 @@ io.on("connection", (socket) => {
       from: socket.user.id,
       timestamp: new Date()
     });
+  });
+
+  // ---- Locked Demo Mode: host (browser) projection control ----
+  // Host starts broadcasting its screen to all/selected guests.
+  socket.on("projection:start", (data, ack) => {
+    const { targets, fps, quality, maxWidth } = data || {};
+    const res = projectionManager.start({
+      host: { userId: socket.user.id, role: socket.user.role, socketId: socket.id },
+      targets: targets === "all" ? "all" : targets,
+      opts: { fps, quality, maxWidth },
+    });
+    if (res.ok) {
+      recordActivity(prisma, {
+        userId: socket.user.id,
+        action: "SCREEN_PROJECTION_START",
+        description: `Started Locked Demo Mode (${
+          targets === "all" ? "all online" : `${(res.perGuest || []).length} selected`
+        }) — session ${res.sessionId}`,
+        ipAddress: socket.handshake?.address || null,
+      });
+    }
+    if (typeof ack === "function") ack(res);
+  });
+
+  // Host pushes a captured JPEG frame (latest-wins fan-out, no response needed).
+  socket.on("projection:frame", (data) => {
+    const { session_id, seq, w, h, screenshot } = data || {};
+    projectionManager.frame({ sessionId: session_id, seq, w, h, screenshot });
+  });
+
+  // Host heartbeat keeps guest watchdogs alive even when frames stall.
+  socket.on("projection:ping", (data) => {
+    const { session_id, ts } = data || {};
+    projectionManager.ping({ sessionId: session_id, ts });
+  });
+
+  // Host stops the session for every guest (idempotent, always wins).
+  socket.on("projection:stop", (data, ack) => {
+    const { session_id } = data || {};
+    const res = projectionManager.stop({ sessionId: session_id, reason: "host_stop" });
+    if (res.sessionId) {
+      recordActivity(prisma, {
+        userId: socket.user.id,
+        action: "SCREEN_PROJECTION_STOP",
+        description: `Stopped Locked Demo Mode — session ${res.sessionId}`,
+        ipAddress: socket.handshake?.address || null,
+      });
+    }
+    if (typeof ack === "function") ack(res);
+  });
+
+  // Host asks for the current status snapshot (e.g. after a reconnect).
+  socket.on("projection:status:request", (_data, ack) => {
+    if (typeof ack === "function") ack(projectionManager.status());
   });
 
   // Chat app: addUser event
@@ -447,6 +522,9 @@ io.on("connection", (socket) => {
       `User disconnected: ${socket.user.fullName} (${socket.user.id})`,
     );
     connectedUsers.delete(socket.user.id);
+
+    // If this user was hosting a projection, tear it down on every guest.
+    projectionManager.onHostDisconnect(socket.id);
 
     // Remove from active users
     activeUsers = activeUsers.filter((user) => user.socketId !== socket.id);

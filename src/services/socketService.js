@@ -131,7 +131,12 @@ class SocketService {
       this.socket.on('scan_complete', (data) => {
         this.emit('scan_complete', data);
       });
-      
+
+      // Locked Demo Mode: per-guest projection status pushed by the server.
+      this.socket.on('projection:status', (data) => {
+        this.emit('projection:status', data);
+      });
+
       console.log('Socket listeners registered');
     } catch (error) {
       console.error('Error creating socket:', error);
@@ -199,6 +204,32 @@ class SocketService {
     if (this.socket?.connected) {
       this.socket.emit('get_user_status', userId, callback);
     }
+  }
+
+  // ---- Locked Demo Mode projection (host side) ----
+  // Start a session: payload { targets: 'all'|[ids], fps?, quality?, maxWidth? }.
+  startProjection(payload, ack) {
+    if (this.socket?.connected) this.socket.emit('projection:start', payload, ack);
+    else if (typeof ack === 'function') ack({ ok: false, error: 'Socket not connected' });
+  }
+
+  stopProjection(payload, ack) {
+    if (this.socket?.connected) this.socket.emit('projection:stop', payload || {}, ack);
+    else if (typeof ack === 'function') ack({ ok: true, error: 'Socket not connected' });
+  }
+
+  // High-frequency frame push: { session_id, seq, w, h, screenshot(base64 jpeg) }.
+  sendProjectionFrame(payload) {
+    if (this.socket?.connected) this.socket.emit('projection:frame', payload);
+  }
+
+  sendProjectionPing(payload) {
+    if (this.socket?.connected) this.socket.emit('projection:ping', payload);
+  }
+
+  requestProjectionStatus(ack) {
+    if (this.socket?.connected) this.socket.emit('projection:status:request', {}, ack);
+    else if (typeof ack === 'function') ack({ active: false, session: null });
   }
 
   // Check if socket is connected

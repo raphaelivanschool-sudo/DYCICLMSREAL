@@ -150,56 +150,19 @@ export const agentsApi = {
   // Wake on LAN
   wakeOnLAN: (mac) => api.post("/api/agents/wake", { mac }),
 
-  /** Host→guest screen projection (server forwards to Flask agent /project on port 5555). */
-  openProjectionWindow: (computerId, meta = {}) => {
-    const body = {};
-    if (computerId) body.computerId = computerId;
-    if (meta.ip) body.ip = meta.ip;
-    if (meta.mac) body.mac = meta.mac;
-    return api.post("/api/agents/projection/open", body);
-  },
+  /**
+   * Locked Demo Mode projection — REST fallbacks for the Socket.IO projection:*
+   * events. The browser host normally drives projection live over the socket
+   * (socketService.startProjection/stopProjection); these mirror it for callers
+   * that cannot hold a socket.
+   */
+  startProjection: ({ targets, fps, quality, maxWidth } = {}) =>
+    api.post("/api/agents/projection/start", { targets, fps, quality, maxWidth }),
 
-  sendProjectionFrame: (computerId, payload = {}, meta = {}) => {
-    const body = { ...payload };
-    if (computerId) body.computerId = computerId;
-    if (meta.ip) body.ip = meta.ip;
-    if (meta.mac) body.mac = meta.mac;
-    return api.post("/api/agents/projection/frame", body);
-  },
+  stopProjection: (sessionId) =>
+    api.post("/api/agents/projection/stop", sessionId ? { session_id: sessionId } : {}),
 
-  requestProjectionPermission: (computerId, payload = {}, meta = {}) => {
-    const body = { ...payload };
-    if (computerId) body.computerId = computerId;
-    if (meta.ip) body.ip = meta.ip;
-    if (meta.mac) body.mac = meta.mac;
-    return api.post("/api/agents/projection/request", body);
-  },
-
-  stopProjectionHttp: (computerId, meta = {}) => {
-    const body = {};
-    if (computerId) body.computerId = computerId;
-    if (meta.ip) body.ip = meta.ip;
-    if (meta.mac) body.mac = meta.mac;
-    return api.post("/api/agents/projection/stop", body);
-  },
-
-  startRtspStream: (computerId, payload = {}, meta = {}) => {
-    const body = { ...payload };
-    if (computerId) body.computerId = computerId;
-    if (meta.ip) body.ip = meta.ip;
-    if (meta.mac) body.mac = meta.mac;
-    return api.post("/api/agents/stream/start", body);
-  },
-
-  stopRtspStream: (computerId, meta = {}) => {
-    const body = {};
-    if (computerId) body.computerId = computerId;
-    if (meta.ip) body.ip = meta.ip;
-    if (meta.mac) body.mac = meta.mac;
-    return api.post("/api/agents/stream/stop", body);
-  },
-
-  stopHostRtspStream: () => api.post("/api/agents/stream/host/stop", {}),
+  getProjectionStatus: () => api.get("/api/agents/projection/status"),
 };
 
 export default api;

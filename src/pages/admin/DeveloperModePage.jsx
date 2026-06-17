@@ -6,10 +6,29 @@ import socketService from '../../services/socketService.js';
 
 const RESULT_TIMEOUT_MS = 90000;
 const SCREENSHOT_AUTO_MS = 3000;
-// Interval for sending JPEG frames to the guest agent (~10 FPS).
-// (This is the proven "projection" path; RTSP/H.264 is separate and currently more fragile.)
-const PROJECTION_INTERVAL_MS = 100;
 const SCAN_POLL_MS = 1500;
+
+// Locked Demo Mode capture defaults / ranges (host screen broadcast).
+const PROJECTION_DEFAULTS = { fps: 12, quality: 60, maxWidth: 1280 };
+const PROJECTION_FPS_RANGE = { min: 5, max: 20 };
+const PROJECTION_QUALITY_RANGE = { min: 30, max: 85 };
+const PROJECTION_PING_MS = 2000; // host heartbeat to keep guest watchdogs alive
+const PROJECTION_PREVIEW_EVERY = 4; // refresh self-preview every N frames
+
+const GUEST_STATE_STYLES = {
+  connecting: 'bg-amber-100 text-amber-800',
+  projecting: 'bg-emerald-100 text-emerald-800',
+  stopping: 'bg-gray-200 text-gray-700',
+  stopped: 'bg-gray-100 text-gray-600',
+  offline: 'bg-gray-100 text-gray-500',
+  error: 'bg-red-100 text-red-800',
+};
+
+function clampNum(raw, { min, max }, fallback) {
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
 
 function blobToBase64(blob) {
   return new Promise((resolve, reject) => {
@@ -74,11 +93,22 @@ function DeveloperModePage() {
   const [screenshotStatus, setScreenshotStatus] = useState('');
   const [screenshotFetching, setScreenshotFetching] = useState(false);
   const [autoRefreshScreenshot, setAutoRefreshScreenshot] = useState(false);
-  const [projectionActive, setProjectionActive] = useState(false);
+  // Locked Demo Mode (host screen broadcast) state.
+  const [projectionSession, setProjectionSession] = useState(null); // { sessionId, perGuest, config }
   const [projectionStatus, setProjectionStatus] = useState('');
+  const [selectedRows, setSelectedRows] = useState(() => new Set()); // agentIds checked
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [projFps, setProjFps] = useState(PROJECTION_DEFAULTS.fps);
+  const [projQuality, setProjQuality] = useState(PROJECTION_DEFAULTS.quality);
+  const [projMaxWidth, setProjMaxWidth] = useState(PROJECTION_DEFAULTS.maxWidth);
+  const [selfPreviewUrl, setSelfPreviewUrl] = useState('');
   const projectionRunningRef = useRef(false);
-  const projectionIntervalRef = useRef(null);
+  const projectionSessionIdRef = useRef(null);
+  const projectionFrameTimerRef = useRef(null);
+  const projectionPingTimerRef = useRef(null);
   const projectionStreamRef = useRef(null);
+  const projectionSeqRef = useRef(0);
+  const projectionActive = projectionSession != null;
   const selectedAgentIdRef = useRef(null);
   const commandTargetComputerIdRef = useRef(null);
   const pendingScreenshotCommandRef = useRef(false);
@@ -275,165 +305,216 @@ function DeveloperModePage() {
     return () => window.clearInterval(id);
   }, [autoRefreshScreenshot, selectedDevice?.ip, requestScreenshot]);
 
-  const stopHostProjection = useCallback(
-    async ({ silent = false } = {}) => {
-      projectionRunningRef.current = false;
-      if (projectionIntervalRef.current != null) {
-        window.clearInterval(projectionIntervalRef.current);
-        projectionIntervalRef.current = null;
-      }
-      const pack = projectionStreamRef.current;
-      projectionStreamRef.current = null;
-      if (pack?.stream) {
-        pack.stream.getTracks().forEach((t) => t.stop());
-      }
-      setProjectionActive(false);
+  // ---- Locked Demo Mode: targets, host capture, broadcast ----
 
-      const agentId = selectedDevice?.agentId;
-      const ip = selectedDevice?.ip;
-      const mac = selectedDevice?.mac;
-      if (!ip) {
-        if (!silent) setProjectionStatus('');
-        return;
-      }
-      try {
-        await agentsApi.stopProjectionHttp(agentId, { ip, mac });
-        if (!silent) setProjectionStatus('✓ Projection stopped on guest');
-      } catch (e) {
-        const msg = e.response?.data?.error || e.message || 'Stop failed';
-        if (!silent) setProjectionStatus(`✗ Stop: ${msg}`);
-      }
-    },
-    [selectedDevice?.agentId, selectedDevice?.ip, selectedDevice?.mac]
+  // Valid projection targets = rows backed by an online agent (have an agentId).
+  const onlineAgents = useMemo(
+    () => results.filter((d) => d.agentId),
+    [results],
+  );
+  const onlineAgentCount = onlineAgents.length;
+  const onlineAgentIds = useMemo(
+    () => new Set(onlineAgents.map((d) => d.agentId)),
+    [onlineAgents],
+  );
+  const guestIsOnline = useCallback((id) => onlineAgentIds.has(id), [onlineAgentIds]);
+  const selectedOnlineCount = useMemo(
+    () => [...selectedRows].filter((id) => onlineAgentIds.has(id)).length,
+    [selectedRows, onlineAgentIds],
   );
 
-  const startHostProjection = useCallback(async () => {
-    if (!selectedDevice?.ip) {
-      setProjectionStatus('✗ Select a PC with an IP first.');
-      return;
-    }
-    if (!navigator.mediaDevices?.getDisplayMedia) {
-      setProjectionStatus('✗ Screen capture is not supported in this browser.');
-      return;
-    }
-    if (projectionRunningRef.current) {
-      setProjectionStatus('✗ Projection already running.');
-      return;
-    }
-    setProjectionStatus('Select a window/screen to share...');
+  const guestStateById = useMemo(() => {
+    const map = {};
+    (projectionSession?.perGuest || []).forEach((g) => { map[g.id] = g; });
+    return map;
+  }, [projectionSession]);
 
-    let stream;
-    try {
-      stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: 15 },
-        audio: false,
-      });
-    } catch (e) {
-      setProjectionStatus(`✗ Screen share cancelled or denied: ${e?.message || e}`);
-      return;
-    }
-
-    const video = document.createElement('video');
-    video.playsInline = true;
-    video.muted = true;
-    video.srcObject = stream;
-    try {
-      await video.play();
-    } catch (e) {
-      stream.getTracks().forEach((t) => t.stop());
-      setProjectionStatus(`✗ Could not start capture: ${e?.message || e}`);
-      return;
-    }
-
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    projectionStreamRef.current = { stream, video, canvas, ctx };
-    projectionRunningRef.current = true;
-    setProjectionActive(true);
-
-    const agentId = selectedDevice?.agentId;
-    const ip = selectedDevice?.ip;
-    const mac = selectedDevice?.mac;
-
-    setProjectionStatus('Opening projection viewer on target PC...');
-    try {
-      await agentsApi.openProjectionWindow(agentId, { ip, mac });
-    } catch (e) {
-      console.warn('[Projection] openProjectionWindow:', e?.message);
-    }
-
-    const sendFrame = async () => {
-      if (!projectionRunningRef.current || !projectionStreamRef.current) return;
-      const { video: v, canvas: c, ctx: cctx } = projectionStreamRef.current;
-      const vw = v.videoWidth;
-      const vh = v.videoHeight;
-      if (!vw || !vh) return;
-
-      const maxW = 1280;
-      const maxH = 720;
-      let tw = vw;
-      let th = vh;
-      if (tw > maxW || th > maxH) {
-        const scale = Math.min(maxW / tw, maxH / th);
-        tw = Math.round(tw * scale);
-        th = Math.round(th * scale);
-      }
-
-      c.width = tw;
-      c.height = th;
-      cctx.drawImage(v, 0, 0, tw, th);
-
-      const blob = await new Promise((res) => c.toBlob(res, 'image/jpeg', 0.52));
-      if (!blob || !projectionRunningRef.current) return;
-      const b64 = await blobToBase64(blob);
-
-      await agentsApi.sendProjectionFrame(
-        agentId,
-        {
-          screenshot: b64,
-          sender_hostname: typeof window !== 'undefined' ? window.location.hostname || 'browser' : 'browser',
-          timestamp: new Date().toISOString(),
-        },
-        { ip, mac }
-      );
-    };
-
-    setProjectionStatus('🖥️ Streaming…');
-    try {
-      await sendFrame();
-    } catch (e) {
-      const msg = e.response?.data?.error || e.message || 'Send failed';
-      setProjectionStatus(`✗ ${msg}`);
-      await stopHostProjection({ silent: true });
-      return;
-    }
-
-    projectionIntervalRef.current = window.setInterval(() => {
-      sendFrame().catch((e) => {
-        const msg = e.response?.data?.error || e.message || 'Send failed';
-        setProjectionStatus(`✗ ${msg}`);
-      });
-    }, PROJECTION_INTERVAL_MS);
-
-    const track = stream.getVideoTracks()[0];
-    track?.addEventListener('ended', () => {
-      stopHostProjection({ silent: false });
+  const toggleRowSelect = useCallback((agentId) => {
+    if (!agentId) return;
+    setSelectedRows((prev) => {
+      const next = new Set(prev);
+      if (next.has(agentId)) next.delete(agentId);
+      else next.add(agentId);
+      return next;
     });
-  }, [selectedDevice?.agentId, selectedDevice?.ip, selectedDevice?.mac, stopHostProjection]);
-
-  useEffect(() => {
-    return () => {
-      projectionRunningRef.current = false;
-      if (projectionIntervalRef.current != null) {
-        window.clearInterval(projectionIntervalRef.current);
-        projectionIntervalRef.current = null;
-      }
-      const pack = projectionStreamRef.current;
-      if (pack?.stream) {
-        pack.stream.getTracks().forEach((t) => t.stop());
-      }
-    };
   }, []);
+
+  const teardownCapture = useCallback(() => {
+    projectionRunningRef.current = false;
+    if (projectionFrameTimerRef.current != null) {
+      window.clearInterval(projectionFrameTimerRef.current);
+      projectionFrameTimerRef.current = null;
+    }
+    if (projectionPingTimerRef.current != null) {
+      window.clearInterval(projectionPingTimerRef.current);
+      projectionPingTimerRef.current = null;
+    }
+    const pack = projectionStreamRef.current;
+    projectionStreamRef.current = null;
+    if (pack?.stream) pack.stream.getTracks().forEach((t) => t.stop());
+    setSelfPreviewUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return '';
+    });
+  }, []);
+
+  const stopProjection = useCallback(
+    ({ silent = false } = {}) => {
+      const sessionId = projectionSessionIdRef.current;
+      teardownCapture();
+      projectionSessionIdRef.current = null;
+      setProjectionSession(null);
+      if (sessionId) socketService.stopProjection({ session_id: sessionId }, () => {});
+      if (!silent) setProjectionStatus('■ Projection stopped.');
+    },
+    [teardownCapture],
+  );
+
+  const startProjection = useCallback(
+    async (targets) => {
+      if (projectionRunningRef.current) {
+        setProjectionStatus('✗ Projection already running. Stop it first.');
+        return;
+      }
+      if (!navigator.mediaDevices?.getDisplayMedia) {
+        setProjectionStatus('✗ Screen capture is not supported in this browser.');
+        return;
+      }
+      const targetCount = targets === 'all' ? onlineAgentCount : targets.length;
+      if (targetCount === 0) {
+        setProjectionStatus('✗ No online agents to project to.');
+        return;
+      }
+      if (!socketService.connected()) socketService.connect();
+
+      setProjectionStatus('Select a window/screen to share…');
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getDisplayMedia({
+          video: { frameRate: projFps },
+          audio: false,
+        });
+      } catch (e) {
+        setProjectionStatus(`✗ Screen share cancelled or denied: ${e?.message || e}`);
+        return;
+      }
+
+      const video = document.createElement('video');
+      video.srcObject = stream;
+      video.muted = true;
+      try {
+        await video.play();
+      } catch (e) {
+        stream.getTracks().forEach((t) => t.stop());
+        setProjectionStatus(`✗ Could not start capture: ${e?.message || e}`);
+        return;
+      }
+
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      projectionStreamRef.current = { stream, video, canvas, ctx };
+      projectionRunningRef.current = true;
+      projectionSeqRef.current = 0;
+
+      // host stops sharing via the browser's own "Stop sharing" control
+      const track = stream.getVideoTracks()[0];
+      track?.addEventListener('ended', () => stopProjection({ silent: false }));
+
+      const sendFrame = () => {
+        const sid = projectionSessionIdRef.current;
+        const pack = projectionStreamRef.current;
+        if (!projectionRunningRef.current || !pack || !sid) return;
+        const { video: v, canvas: c, ctx: cctx } = pack;
+        const vw = v.videoWidth;
+        const vh = v.videoHeight;
+        if (!vw || !vh) return;
+        let tw = vw;
+        let th = vh;
+        if (tw > projMaxWidth) {
+          const scale = projMaxWidth / tw;
+          tw = Math.round(tw * scale);
+          th = Math.round(th * scale);
+        }
+        c.width = tw;
+        c.height = th;
+        cctx.drawImage(v, 0, 0, tw, th);
+        c.toBlob(
+          async (blob) => {
+            if (!blob || !projectionRunningRef.current) return;
+            const b64 = await blobToBase64(blob);
+            const seq = (projectionSeqRef.current += 1);
+            socketService.sendProjectionFrame({ session_id: sid, seq, w: tw, h: th, screenshot: b64 });
+            if (seq % PROJECTION_PREVIEW_EVERY === 0) {
+              const url = URL.createObjectURL(blob);
+              setSelfPreviewUrl((prev) => {
+                if (prev) URL.revokeObjectURL(prev);
+                return url;
+              });
+            }
+          },
+          'image/jpeg',
+          projQuality / 100,
+        );
+      };
+
+      const beginLoops = () => {
+        const frameMs = Math.round(1000 / projFps);
+        projectionFrameTimerRef.current = window.setInterval(sendFrame, frameMs);
+        projectionPingTimerRef.current = window.setInterval(() => {
+          const sid = projectionSessionIdRef.current;
+          if (sid) socketService.sendProjectionPing({ session_id: sid, ts: Date.now() });
+        }, PROJECTION_PING_MS);
+        sendFrame();
+      };
+
+      setProjectionStatus('Starting projection…');
+      socketService.startProjection(
+        { targets, fps: projFps, quality: projQuality, maxWidth: projMaxWidth },
+        (res) => {
+          if (!res?.ok) {
+            teardownCapture();
+            setProjectionStatus(`✗ ${res?.error || 'Server rejected projection.'}`);
+            return;
+          }
+          projectionSessionIdRef.current = res.sessionId;
+          setProjectionSession({
+            sessionId: res.sessionId,
+            perGuest: res.perGuest || [],
+            config: res.config,
+          });
+          setProjectionStatus(`🖥️ Projecting to ${targetCount} PC(s)…`);
+          beginLoops();
+        },
+      );
+    },
+    [projFps, projQuality, projMaxWidth, onlineAgentCount, teardownCapture, stopProjection],
+  );
+
+  // Live per-guest status pushed by the server.
+  useEffect(() => {
+    const unsub = socketService.on('projection:status', (data) => {
+      setProjectionSession((prev) => {
+        if (!prev || !data) return prev;
+        if (data.session_id && prev.sessionId && data.session_id !== prev.sessionId) return prev;
+        return {
+          ...prev,
+          perGuest: data.perGuest || prev.perGuest,
+          config: data.config || prev.config,
+        };
+      });
+    });
+    return unsub;
+  }, []);
+
+  // Tear down capture (and tell the server to stop) if the page unmounts.
+  useEffect(
+    () => () => {
+      teardownCapture();
+      const sid = projectionSessionIdRef.current;
+      if (sid) socketService.stopProjection({ session_id: sid }, () => {});
+    },
+    [teardownCapture],
+  );
 
   const runDiscovery = async () => {
     setDiscovering(true);
@@ -617,8 +698,37 @@ function DeveloperModePage() {
     }
   };
 
+  const projectingCount = (projectionSession?.perGuest || []).filter(
+    (g) => g.state === 'projecting' || g.state === 'connecting',
+  ).length;
+  const failedCount = (projectionSession?.perGuest || []).filter(
+    (g) => g.state === 'error' || g.state === 'offline',
+  ).length;
+  const totalGuests = projectionSession?.perGuest?.length || 0;
+
   return (
     <div className="space-y-6">
+      {projectionActive && (
+        <div className="sticky top-0 z-30 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-red-300 bg-red-50 px-5 py-3 shadow-sm">
+          <div className="flex items-center gap-3">
+            <span className="relative flex h-3 w-3">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-400 opacity-75" />
+              <span className="relative inline-flex h-3 w-3 rounded-full bg-red-600" />
+            </span>
+            <span className="text-sm font-semibold text-red-900">
+              Locked Demo Mode active — projecting to {projectingCount} of {totalGuests} PC(s)
+              {failedCount > 0 ? ` — ${failedCount} failed` : ''}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => stopProjection({ silent: false })}
+            className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-5 py-2.5 text-sm font-bold text-white shadow hover:bg-red-700"
+          >
+            ■ Stop projection
+          </button>
+        </div>
+      )}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200">
         <div className="bg-gray-900 text-white p-6 rounded-t-xl">
           <h1 className="text-2xl font-bold flex items-center gap-3">
@@ -709,23 +819,116 @@ function DeveloperModePage() {
           <p className="text-sm text-gray-500">Hybrid sources: server scan + UDP broadcast</p>
         </div>
 
+        {/* Locked Demo Mode control bar */}
+        <div className="px-6 py-4 border-b border-gray-200 bg-violet-50/40 space-y-3">
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={() => startProjection('all')}
+              disabled={projectionActive || onlineAgentCount === 0}
+              className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              🖥️ Project to all online agents ({onlineAgentCount})
+            </button>
+            <button
+              type="button"
+              onClick={() => startProjection([...selectedRows].filter((id) => guestIsOnline(id)))}
+              disabled={projectionActive || selectedOnlineCount === 0}
+              className="inline-flex items-center gap-2 rounded-lg border border-violet-300 bg-white px-4 py-2 text-sm font-semibold text-violet-700 hover:bg-violet-100 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Project to selected ({selectedOnlineCount})
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowAdvanced((v) => !v)}
+              className="text-sm text-gray-600 underline decoration-dotted hover:text-gray-900"
+            >
+              {showAdvanced ? 'Hide advanced' : 'Advanced…'}
+            </button>
+            {onlineAgentCount === 0 && (
+              <span className="text-xs text-gray-500">No online agents — start the DYCI agent on a lab PC.</span>
+            )}
+          </div>
+          {showAdvanced && (
+            <div className="flex flex-wrap items-center gap-5 text-sm text-gray-700">
+              <label className="flex items-center gap-2">
+                FPS
+                <input
+                  type="number"
+                  min={PROJECTION_FPS_RANGE.min}
+                  max={PROJECTION_FPS_RANGE.max}
+                  value={projFps}
+                  disabled={projectionActive}
+                  onChange={(e) => setProjFps(clampNum(e.target.value, PROJECTION_FPS_RANGE, PROJECTION_DEFAULTS.fps))}
+                  className="w-20 rounded border border-gray-300 px-2 py-1"
+                />
+              </label>
+              <label className="flex items-center gap-2">
+                JPEG quality
+                <input
+                  type="number"
+                  min={PROJECTION_QUALITY_RANGE.min}
+                  max={PROJECTION_QUALITY_RANGE.max}
+                  value={projQuality}
+                  disabled={projectionActive}
+                  onChange={(e) => setProjQuality(clampNum(e.target.value, PROJECTION_QUALITY_RANGE, PROJECTION_DEFAULTS.quality))}
+                  className="w-20 rounded border border-gray-300 px-2 py-1"
+                />
+              </label>
+              <label className="flex items-center gap-2">
+                Max width
+                <input
+                  type="number"
+                  min={640}
+                  max={3840}
+                  step={160}
+                  value={projMaxWidth}
+                  disabled={projectionActive}
+                  onChange={(e) => setProjMaxWidth(clampNum(e.target.value, { min: 640, max: 3840 }, PROJECTION_DEFAULTS.maxWidth))}
+                  className="w-24 rounded border border-gray-300 px-2 py-1"
+                />
+              </label>
+            </div>
+          )}
+          {projectionStatus && (
+            <p className={`text-sm ${projectionStatus.startsWith('✗') ? 'text-red-700' : 'text-violet-900'}`}>
+              {projectionStatus}
+            </p>
+          )}
+        </div>
+
         <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
             <thead className="bg-gray-50">
               <tr>
+                <th className="px-4 py-3">
+                  <input
+                    type="checkbox"
+                    className="rounded border-gray-300"
+                    title="Select all online agents"
+                    checked={onlineAgentCount > 0 && selectedOnlineCount === onlineAgentCount}
+                    onChange={(e) =>
+                      setSelectedRows(
+                        e.target.checked ? new Set(onlineAgents.map((d) => d.agentId)) : new Set(),
+                      )
+                    }
+                    disabled={onlineAgentCount === 0}
+                  />
+                </th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Hostname</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">IP</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">MAC</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Status</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Connection</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Source</th>
+                <th className="text-left px-4 py-3 font-medium text-gray-600">Projection</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-600">Action</th>
               </tr>
             </thead>
             <tbody>
               {results.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-6 text-center text-gray-500">
+                  <td colSpan={9} className="px-4 py-6 text-center text-gray-500">
                     {discovering ? 'Running server scan...' : 'No results yet. Click “Scan Server Network”.'}
                   </td>
                 </tr>
@@ -736,6 +939,16 @@ function DeveloperModePage() {
                     className={`border-t border-gray-100 cursor-pointer ${selectedIp === device.ip ? 'bg-amber-50' : ''}`}
                     onClick={() => setSelectedIp(device.ip || '')}
                   >
+                    <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        className="rounded border-gray-300 disabled:opacity-40"
+                        checked={device.agentId ? selectedRows.has(device.agentId) : false}
+                        onChange={() => toggleRowSelect(device.agentId)}
+                        disabled={!device.agentId}
+                        title={device.agentId ? 'Select for projection' : 'No reachable agent on this row'}
+                      />
+                    </td>
                     <td className="px-4 py-3 text-gray-700">{device.user || device.hostname || 'Unknown'}</td>
                     <td className="px-4 py-3 text-gray-700">{device.ip || '-'}</td>
                     <td className="px-4 py-3 text-gray-700">{device.mac || '-'}</td>
@@ -744,6 +957,21 @@ function DeveloperModePage() {
                     <td className="px-4 py-3 text-gray-700 flex items-center gap-2">
                       {device.source?.includes('broadcast') && <Radio className="w-4 h-4 text-purple-600" />}
                       {device.source || 'unknown'}
+                    </td>
+                    <td className="px-4 py-3">
+                      {(() => {
+                        const g = device.agentId ? guestStateById[device.agentId] : null;
+                        if (!g) return <span className="text-xs text-gray-400">—</span>;
+                        return (
+                          <span
+                            className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${GUEST_STATE_STYLES[g.state] || 'bg-gray-100 text-gray-600'}`}
+                            title={g.detail || ''}
+                          >
+                            {g.state}
+                            {g.state === 'error' && g.detail ? `: ${g.detail}` : ''}
+                          </span>
+                        );
+                      })()}
                     </td>
                     <td className="px-4 py-3 text-gray-700">
                       <div className="flex flex-wrap items-center gap-2">
@@ -771,6 +999,18 @@ function DeveloperModePage() {
                         >
                           <Power className="w-3.5 h-3.5" />
                           {shuttingDownIp === device.ip ? 'Shutting down...' : 'Shutdown'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(evt) => {
+                            evt.stopPropagation();
+                            startProjection([device.agentId]);
+                          }}
+                          disabled={!device.agentId || projectionActive}
+                          title={device.agentId ? 'Project to this PC' : 'No reachable agent on this row'}
+                          className="px-3 py-1.5 rounded-md text-xs font-medium text-white bg-violet-600 hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          🖥️ Project
                         </button>
                       </div>
                     </td>
@@ -818,19 +1058,12 @@ function DeveloperModePage() {
                 </label>
                 <button
                   type="button"
-                  onClick={startHostProjection}
-                  disabled={!selectedDevice?.ip || projectionActive}
+                  onClick={() => selectedDevice?.agentId && startProjection([selectedDevice.agentId])}
+                  disabled={!selectedDevice?.agentId || projectionActive}
+                  title={selectedDevice?.agentId ? 'Project to this PC' : 'No reachable agent on this row'}
                   className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm text-white bg-violet-600 hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  🖥️ Project my screen
-                </button>
-                <button
-                  type="button"
-                  onClick={() => stopHostProjection({ silent: false })}
-                  disabled={!projectionActive}
-                  className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm text-white bg-gray-700 hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  ⏹️ Stop projection
+                  🖥️ Project to this PC
                 </button>
               </div>
             </div>
@@ -855,22 +1088,26 @@ function DeveloperModePage() {
                 {screenshotStatus}
               </p>
             )}
-            {projectionStatus && (
-              <p
-                className={`text-sm ${
-                  projectionStatus.startsWith('✗') ? 'text-red-700' : 'text-violet-900'
-                }`}
-              >
-                {projectionStatus}
-              </p>
+
+            {selfPreviewUrl && (
+              <div className="flex items-start gap-3">
+                <div>
+                  <p className="text-xs font-medium text-gray-600 mb-1">What guests see (self-preview)</p>
+                  <img
+                    src={selfPreviewUrl}
+                    alt="Projection self preview"
+                    className="w-64 rounded border border-violet-300 object-contain bg-black"
+                  />
+                </div>
+              </div>
             )}
+
             <p className="text-xs text-gray-500 max-w-3xl">
-              Host→guest projection forwards JPEG frames to each guest&apos;s <strong>Python</strong> agent on TCP{' '}
-              <strong>5555</strong>. The API server loads <code className="bg-gray-100 px-1 rounded">api_key</code> from{' '}
-              <code className="bg-gray-100 px-1 rounded">agent/pc-agent/python/agent_config.json</code> when{' '}
-              <code className="bg-gray-100 px-1 rounded">PC_AGENT_API_KEY</code> is not set — use the{' '}
-              <strong>same</strong> key on the guest PC. Override with <code className="bg-gray-100 px-1 rounded">PC_AGENT_API_KEY</code> in{' '}
-              <code className="bg-gray-100 px-1 rounded">server/.env</code> if the guest uses a different file.
+              <strong>Locked Demo Mode</strong> broadcasts your screen as JPEG frames over Socket.IO to each guest&apos;s
+              DYCI agent, which renders a fullscreen, input-locked overlay the student cannot dismiss. Use{' '}
+              <strong>Project to all</strong> or check rows and <strong>Project to selected</strong>. The overlay ends
+              only on <strong>Stop</strong>, host disconnect, or the guest watchdog (≈8s without frames). Full input
+              lock requires the guest agent to run elevated; Ctrl+Alt+Del cannot be blocked.
             </p>
           </div>
         ) : null}

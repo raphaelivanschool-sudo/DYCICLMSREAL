@@ -5,56 +5,109 @@ const os = require('os');
 const { exec, spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs').promises;
+const fsSync = require('fs');
 const http = require('http');
 const https = require('https');
 const util = require('util');
 
-// --- Projection state ---
-let projectionProcess = null;
+// --- Locked Demo Mode projection (host screen broadcast) ---
+// The Node agent receives projection_* events over Socket.IO and renders the
+// host screen in a LOCKED Python overlay (projection_overlay.py) that the guest
+// cannot dismiss. Node writes each JPEG frame to a temp file the overlay reads,
+// and keeps a heartbeat file fresh; the overlay self-tears-down (restoring input)
+// if the heartbeat goes stale — so a crashed agent never leaves a guest locked.
 const PROJECTION_FRAME_PATH = path.join(os.tmpdir(), 'dyci_projection_frame.jpg');
 const PROJECTION_FRAME_TMP  = PROJECTION_FRAME_PATH + '.tmp';
-const PROJECTION_VIEWER_PS1 = path.join(os.tmpdir(), 'dyci_projection_viewer.ps1');
+const PROJECTION_HEARTBEAT_PATH = path.join(os.tmpdir(), 'dyci_projection.alive');
 
-const PROJECTION_VIEWER_SCRIPT = `
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$form = New-Object System.Windows.Forms.Form
-$form.FormBorderStyle = 'None'
-$form.WindowState = 'Maximized'
-$form.TopMost = $true
-$form.BackColor = [System.Drawing.Color]::Black
-$pb = New-Object System.Windows.Forms.PictureBox
-$pb.Dock = 'Fill'
-$pb.SizeMode = 'Zoom'
-$form.Controls.Add($pb)
-$framePath = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), 'dyci_projection_frame.jpg')
-$timer = New-Object System.Windows.Forms.Timer
-$timer.Interval = 150
-$lastMod = [datetime]::MinValue
-$timer.Add_Tick({
-    try {
-        if ([System.IO.File]::Exists($framePath)) {
-            $mod = [System.IO.File]::GetLastWriteTime($framePath)
-            if ($mod -ne $lastMod) {
-                $lastMod = $mod
-                $bytes = [System.IO.File]::ReadAllBytes($framePath)
-                $ms = New-Object System.IO.MemoryStream(, $bytes)
-                $img = [System.Drawing.Image]::FromStream($ms)
-                if ($pb.Image) { $pb.Image.Dispose() }
-                $pb.Image = $img
-            }
-        }
-    } catch {}
-})
-$timer.Start()
-$form.Add_KeyDown({ if ($_.KeyCode -eq [System.Windows.Forms.Keys]::Escape) { $form.Close() } })
-$form.ShowDialog()
-`;
+const projection = {
+  active: false,
+  sessionId: null,
+  overlayProc: null,
+  lastSeq: -1,
+  lastActivity: 0,        // epoch ms of last frame OR ping
+  watchdogSeconds: 8,
+  watchdogTimer: null,
+  stopping: false,
+};
 
 function normalizeServerUrl(url) {
-  const s = String(url || '').trim().replace(/\/+$/, '');
-  return s || 'http://localhost:3001';
+  let s = String(url || '').trim().replace(/\/+$/, '');
+  if (!s) return 'http://localhost:3001';
+  // Accept a bare IP or host (e.g. "172.24.112.1" or "172.24.112.1:3001"):
+  // add the scheme, then default the port to 3001 if none was given.
+  if (!/^https?:\/\//i.test(s)) s = 'http://' + s;
+  try {
+    const u = new URL(s);
+    if (!u.port) u.port = '3001';
+    return u.toString().replace(/\/+$/, '');
+  } catch {
+    return 'http://localhost:3001';
+  }
 }
+
+// --- Server selection ----------------------------------------------------
+// Decide which server (IP/URL) to connect to. Precedence, highest first:
+//   1. CLI flag    --server <ip|url>   or   --use <profileName>
+//   2. Env var     SERVER_URL
+//   3. Config file pc-agent/agent.config.json  (active profile, or serverUrl)
+//   4. Default     http://localhost:3001
+const CONFIG_PATH = path.join(__dirname, 'agent.config.json');
+
+function loadConfigFile() {
+  try {
+    return JSON.parse(fsSync.readFileSync(CONFIG_PATH, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function parseCliArgs(argv) {
+  const out = {};
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--server' || a === '-s') { out.server = argv[++i]; }
+    else if (a.startsWith('--server=')) { out.server = a.slice('--server='.length); }
+    else if (a === '--use' || a === '-u') { out.use = argv[++i]; }
+    else if (a.startsWith('--use=')) { out.use = a.slice('--use='.length); }
+    else if (a === '--id') { out.id = argv[++i]; }
+    else if (a.startsWith('--id=')) { out.id = a.slice('--id='.length); }
+  }
+  return out;
+}
+
+const fileConfig = loadConfigFile();
+const cliArgs = parseCliArgs(process.argv.slice(2));
+
+function resolveServerUrl() {
+  const servers = fileConfig.knownServers || {};
+  // 1. CLI --server <ip|url>
+  if (cliArgs.server) {
+    return { url: normalizeServerUrl(cliArgs.server), source: 'CLI --server' };
+  }
+  // 1b. CLI --use <profile>
+  if (cliArgs.use) {
+    if (servers[cliArgs.use]) {
+      return { url: normalizeServerUrl(servers[cliArgs.use]), source: `CLI --use "${cliArgs.use}"` };
+    }
+    console.warn(`[Config] Unknown profile "--use ${cliArgs.use}". Known: ${Object.keys(servers).join(', ') || '(none)'}`);
+  }
+  // 2. SERVER_URL env var (keeps PowerShell / Windows-service behavior working)
+  if (process.env.SERVER_URL) {
+    return { url: normalizeServerUrl(process.env.SERVER_URL), source: 'env SERVER_URL' };
+  }
+  // 3. config file: active named profile, then explicit serverUrl
+  if (fileConfig.active && servers[fileConfig.active]) {
+    return { url: normalizeServerUrl(servers[fileConfig.active]), source: `config active "${fileConfig.active}"` };
+  }
+  if (fileConfig.serverUrl) {
+    return { url: normalizeServerUrl(fileConfig.serverUrl), source: 'config serverUrl' };
+  }
+  // 4. default
+  return { url: 'http://localhost:3001', source: 'default' };
+}
+
+const resolvedServer = resolveServerUrl();
 
 /**
  * Verifies the same HTTP server Socket.IO uses responds (GET /health).
@@ -127,8 +180,8 @@ function formatSocketConnectError(err) {
 
 // Configuration
 const CONFIG = {
-  serverUrl: normalizeServerUrl(process.env.SERVER_URL || 'http://localhost:3001'),
-  computerId: process.env.COMPUTER_ID || `${os.hostname()}-${Math.random().toString(36).substr(2, 9)}`,
+  serverUrl: resolvedServer.url,
+  computerId: cliArgs.id || process.env.COMPUTER_ID || fileConfig.computerId || `${os.hostname()}-${Math.random().toString(36).substr(2, 9)}`,
   heartbeatInterval: 30000, // 30 seconds
   statusUpdateInterval: 5000, // 5 seconds
   reconnectInterval: 5000, // 5 seconds
@@ -372,17 +425,47 @@ async function connect() {
       await executeCommand(command);
     });
 
-    // High-frequency projection frame delivery — no response needed
+    // Locked Demo Mode: host wants to start projecting onto this guest.
+    socket.on('projection_start', async (data) => {
+      try {
+        await startProjection(data || {});
+      } catch (err) {
+        console.error('[Projection] start error:', err.message);
+        sendProjectionAck('error', err.message || 'Failed to start overlay');
+      }
+    });
+
+    // High-frequency frame delivery — newest seq wins, stale frames dropped.
     socket.on('projection_frame', async (data) => {
       try {
-        const { screenshot } = data || {};
+        const { session_id, seq, screenshot } = data || {};
+        if (!projection.active || session_id !== projection.sessionId) return;
         if (!screenshot || typeof screenshot !== 'string') return;
+        if (typeof seq === 'number' && seq <= projection.lastSeq) return; // drop stale/out-of-order
+        if (typeof seq === 'number') projection.lastSeq = seq;
         const buf = Buffer.from(screenshot, 'base64');
         await fs.writeFile(PROJECTION_FRAME_TMP, buf);
         await fs.rename(PROJECTION_FRAME_TMP, PROJECTION_FRAME_PATH);
+        await touchProjectionHeartbeat();
       } catch (err) {
         console.error('[Projection] Frame write error:', err.message);
       }
+    });
+
+    // Heartbeat keeps the overlay alive even when frames stall; reply with pong.
+    socket.on('projection_ping', async (data) => {
+      const { session_id, ts } = data || {};
+      if (!projection.active || session_id !== projection.sessionId) return;
+      await touchProjectionHeartbeat();
+      if (socket) socket.emit('projection_pong', { session_id, ts: ts || Date.now() });
+    });
+
+    // Stop is honored unconditionally and immediately.
+    socket.on('projection_stop', async (data) => {
+      const { session_id } = data || {};
+      // Accept stop for the active session, or a bare stop with no id (safety).
+      if (session_id && projection.sessionId && session_id !== projection.sessionId) return;
+      await stopProjection('host_stop');
     });
 
     // Handle disconnection
@@ -391,6 +474,11 @@ async function connect() {
       isRegistered = false;
       stopHeartbeat();
       stopStatusUpdates();
+      // Fail-open: lost the server → tear down any locked overlay so the guest
+      // is never left locked. (The overlay's own watchdog is the final backstop.)
+      if (projection.active) {
+        stopProjection('server_disconnected').catch(() => {});
+      }
     });
 
     // Handle errors
@@ -450,12 +538,6 @@ async function executeCommand(command) {
         break;
       case 'screenshot':
         result = await takeScreenshot();
-        break;
-      case 'projection_start':
-        await startProjectionViewer();
-        break;
-      case 'projection_stop':
-        await stopProjectionViewer();
         break;
       default:
         console.log(`Unknown command: ${action}`);
@@ -643,31 +725,164 @@ async function takeScreenshot() {
   };
 }
 
-async function startProjectionViewer() {
-  await stopProjectionViewer();
-  await fs.writeFile(PROJECTION_VIEWER_PS1, PROJECTION_VIEWER_SCRIPT, 'utf8');
-  projectionProcess = spawn(
-    'powershell.exe',
-    ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', PROJECTION_VIEWER_PS1],
-    { detached: true, stdio: 'ignore', windowsHide: false }
-  );
-  projectionProcess.unref();
-  console.log('[Projection] Viewer started PID:', projectionProcess.pid);
-  projectionProcess.on('exit', () => {
-    console.log('[Projection] Viewer exited');
-    projectionProcess = null;
-  });
+// ---- Locked overlay subprocess management ----
+
+/** Send a projection acknowledgement back to the server. */
+function sendProjectionAck(state, detail) {
+  if (socket && socket.connected) {
+    socket.emit('projection_ack', {
+      session_id: projection.sessionId,
+      state,
+      detail: detail || null,
+    });
+  }
 }
 
-async function stopProjectionViewer() {
-  if (projectionProcess) {
-    try { exec(`taskkill /PID ${projectionProcess.pid} /T /F`, () => {}); } catch {}
-    projectionProcess = null;
+/** Locate projection_overlay.py — config/env override, then known repo layouts. */
+function resolveOverlayScript() {
+  const candidates = [
+    process.env.PROJECTION_OVERLAY_PATH,
+    fileConfig.overlayScript,
+    path.join(__dirname, 'projection_overlay.py'),
+    path.join(__dirname, 'python', 'projection_overlay.py'),
+    path.join(__dirname, '..', 'agent', 'pc-agent', 'python', 'projection_overlay.py'),
+    path.join(__dirname, '..', 'pc-agent', 'python', 'projection_overlay.py'),
+  ].filter(Boolean);
+  for (const c of candidates) {
+    try { if (fsSync.existsSync(c)) return c; } catch { /* ignore */ }
   }
-  try { await fs.unlink(PROJECTION_FRAME_PATH); } catch {}
-  try { await fs.unlink(PROJECTION_FRAME_TMP);  } catch {}
-  try { await fs.unlink(PROJECTION_VIEWER_PS1); } catch {}
-  console.log('[Projection] Viewer stopped');
+  return null;
+}
+
+/** Pick a Python launcher that hides the console window when possible. */
+function resolvePythonCommand() {
+  if (process.env.PROJECTION_PYTHON) return process.env.PROJECTION_PYTHON;
+  if (process.platform === 'win32') return 'pythonw.exe';
+  return 'python3';
+}
+
+/** Touch/refresh the heartbeat file the overlay watchdog reads. */
+async function touchProjectionHeartbeat() {
+  projection.lastActivity = Date.now();
+  try {
+    await fs.writeFile(PROJECTION_HEARTBEAT_PATH, String(projection.lastActivity));
+  } catch (err) {
+    console.error('[Projection] heartbeat write failed:', err.message);
+  }
+}
+
+/** Spawn the locked Python overlay for the given session. */
+function spawnOverlay() {
+  const script = resolveOverlayScript();
+  if (!script) {
+    throw new Error(
+      'projection_overlay.py not found. Set PROJECTION_OVERLAY_PATH or place it beside the agent.',
+    );
+  }
+  const py = resolvePythonCommand();
+  const args = [
+    script,
+    '--frame', PROJECTION_FRAME_PATH,
+    '--heartbeat', PROJECTION_HEARTBEAT_PATH,
+    '--watchdog', String(projection.watchdogSeconds),
+    '--session', projection.sessionId || '',
+  ];
+  const proc = spawn(py, args, { detached: false, stdio: 'ignore', windowsHide: true });
+  proc.on('exit', (code) => {
+    console.log(`[Projection] Overlay exited (code ${code})`);
+    if (projection.overlayProc === proc) projection.overlayProc = null;
+    // Supervisor: if the overlay died mid-session (not during teardown), relaunch.
+    if (projection.active && !projection.stopping) {
+      try {
+        projection.overlayProc = spawnOverlay();
+        console.log('[Projection] Overlay relaunched by supervisor');
+      } catch (err) {
+        console.error('[Projection] relaunch failed:', err.message);
+        sendProjectionAck('error', `Overlay crashed and relaunch failed: ${err.message}`);
+      }
+    }
+  });
+  return proc;
+}
+
+/** Start a locked projection session on this guest. */
+async function startProjection(data) {
+  const sessionId = data.session_id || `local-${Date.now()}`;
+  const watchdog = parseInt(data.watchdog_seconds, 10);
+  // Already projecting this session → re-ack and continue (idempotent late-joiner resend).
+  if (projection.active && projection.sessionId === sessionId) {
+    sendProjectionAck('projecting', 'Already active');
+    return;
+  }
+  // Different session active → swap to the new one cleanly.
+  if (projection.active) await stopProjection('superseded');
+
+  projection.active = true;
+  projection.stopping = false;
+  projection.sessionId = sessionId;
+  projection.lastSeq = -1;
+  projection.watchdogSeconds = Number.isFinite(watchdog) ? watchdog : 8;
+
+  // Clear any stale frame so the overlay shows the "presenting…" placeholder first.
+  try { await fs.unlink(PROJECTION_FRAME_PATH); } catch { /* ignore */ }
+  await touchProjectionHeartbeat();
+
+  projection.overlayProc = spawnOverlay();
+  console.log('[Projection] Overlay started PID:', projection.overlayProc.pid);
+
+  // Node-side watchdog: if no frame/ping arrives within the window, fail open.
+  if (projection.watchdogTimer) clearInterval(projection.watchdogTimer);
+  projection.watchdogTimer = setInterval(() => {
+    if (!projection.active) return;
+    const idle = Date.now() - projection.lastActivity;
+    if (idle > projection.watchdogSeconds * 1000) {
+      console.warn(`[Projection] watchdog timeout (${idle}ms) — tearing down`);
+      stopProjection('watchdog_timeout').catch(() => {});
+    }
+  }, 1000);
+
+  sendProjectionAck('projecting', null);
+}
+
+/** Stop the projection session and restore the guest to normal (idempotent). */
+async function stopProjection(reason) {
+  if (!projection.active && !projection.overlayProc) {
+    sendProjectionAck('stopped', reason || null);
+    return;
+  }
+  projection.stopping = true;
+  projection.active = false;
+
+  if (projection.watchdogTimer) {
+    clearInterval(projection.watchdogTimer);
+    projection.watchdogTimer = null;
+  }
+
+  // Graceful stop first: removing the heartbeat tells the overlay to exit and
+  // restore input/taskbar cleanly. Force-kill as a fallback shortly after.
+  try { await fs.unlink(PROJECTION_HEARTBEAT_PATH); } catch { /* ignore */ }
+
+  const proc = projection.overlayProc;
+  projection.overlayProc = null;
+  if (proc) {
+    try { proc.kill(); } catch { /* ignore */ }
+    const pid = proc.pid;
+    setTimeout(() => {
+      if (process.platform === 'win32') {
+        try { exec(`taskkill /PID ${pid} /T /F`, () => {}); } catch { /* ignore */ }
+      } else {
+        try { proc.kill('SIGKILL'); } catch { /* ignore */ }
+      }
+    }, 1500);
+  }
+
+  try { await fs.unlink(PROJECTION_FRAME_PATH); } catch { /* ignore */ }
+  try { await fs.unlink(PROJECTION_FRAME_TMP);  } catch { /* ignore */ }
+
+  console.log(`[Projection] Stopped (${reason || 'stop'})`);
+  sendProjectionAck('stopped', reason || null);
+  projection.sessionId = null;
+  projection.stopping = false;
 }
 
 // Lock computer (Windows)
@@ -804,7 +1019,7 @@ process.on('SIGINT', async () => {
   console.log('Shutting down agent...');
   stopHeartbeat();
   stopStatusUpdates();
-  await stopProjectionViewer();
+  await stopProjection('agent_shutdown');
   if (socket) {
     socket.disconnect();
   }
@@ -815,7 +1030,7 @@ process.on('SIGTERM', async () => {
   console.log('Shutting down agent...');
   stopHeartbeat();
   stopStatusUpdates();
-  await stopProjectionViewer();
+  await stopProjection('agent_shutdown');
   if (socket) {
     socket.disconnect();
   }
@@ -825,4 +1040,5 @@ process.on('SIGTERM', async () => {
 // Start the agent
 console.log('DYCICLMS PC Agent starting...');
 console.log(`Computer ID: ${CONFIG.computerId}`);
+console.log(`Server: ${CONFIG.serverUrl}  (from ${resolvedServer.source})`);
 connect();

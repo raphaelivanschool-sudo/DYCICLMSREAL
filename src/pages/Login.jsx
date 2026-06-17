@@ -16,6 +16,45 @@ function Login() {
   const [isLoading, setIsLoading] = useState(false);
   const navigate = useNavigate();
 
+  // --- DEV QUICK LOGIN (no database / no XAMPP required) ---
+  // Mirrors the seeded users in prisma/seed.cjs so the dashboards get
+  // realistic ids. This bypasses the backend /api/auth/login entirely:
+  // it just writes a token + user into localStorage, which is all that
+  // ProtectedRoute checks. Remove this block to restore real auth.
+  const devUsers = {
+    admin: {
+      id: 1,
+      username: 'admin',
+      role: 'ADMIN',
+      fullName: 'System Administrator',
+      email: 'admin@dyci.edu',
+    },
+    instructor: {
+      id: 2,
+      username: 'instructor1',
+      role: 'INSTRUCTOR',
+      fullName: 'Mr. Cruz',
+      email: 'instructor1@dyci.edu',
+    },
+    student: {
+      id: 4,
+      username: 'student1',
+      role: 'STUDENT',
+      fullName: 'Juan Dela Cruz',
+      email: 'student1@dyci.edu',
+    },
+  };
+
+  const devLogin = (key) => {
+    const user = devUsers[key];
+    // Fake, clearly-marked token so anything reading localStorage.token works.
+    localStorage.setItem('token', `dev-bypass-token.${key}`);
+    localStorage.setItem('user', JSON.stringify(user));
+    if (user.role === 'ADMIN') navigate('/admin/dashboard');
+    else if (user.role === 'INSTRUCTOR') navigate('/instructor/dashboard');
+    else navigate('/student/dashboard');
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
@@ -138,6 +177,36 @@ function Login() {
               )}
             </button>
           </form>
+
+          {/* --- DEV QUICK LOGIN (no database required) --- */}
+          <div className="mt-6 pt-5 border-t border-dashed border-gray-200">
+            <p className="text-xs font-medium text-slate-500 text-center mb-3">
+              Developer quick login · skips authentication (no XAMPP/MySQL needed)
+            </p>
+            <div className="grid grid-cols-3 gap-2">
+              <button
+                type="button"
+                onClick={() => devLogin('student')}
+                className="h-10 rounded-md text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition-colors"
+              >
+                Student
+              </button>
+              <button
+                type="button"
+                onClick={() => devLogin('instructor')}
+                className="h-10 rounded-md text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 transition-colors"
+              >
+                Professor
+              </button>
+              <button
+                type="button"
+                onClick={() => devLogin('admin')}
+                className="h-10 rounded-md text-xs font-semibold bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 transition-colors"
+              >
+                Admin
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 
