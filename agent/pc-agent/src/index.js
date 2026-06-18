@@ -578,10 +578,13 @@ class PCAgent {
           result = await this.lockWorkstation();
           break;
         case 'shutdown':
-          result = await this.shutdownPC(params?.delay || 0);
+          result = await this.shutdownPC(params || {});
           break;
         case 'restart':
-          result = await this.restartPC(params?.delay || 0);
+          result = await this.restartPC(params || {});
+          break;
+        case 'abort_shutdown':
+          result = await this.abortShutdown();
           break;
         case 'vnc-start':
           result = await this.startVNC(params);
@@ -651,29 +654,56 @@ class PCAgent {
     }
   }
 
-  async shutdownPC(delay = 0) {
-    this.logger.info(`Shutting down PC (delay: ${delay}s)...`);
+  // Graceful power action by default: scheduled countdown the guest can see, with
+  // an on-screen warning (/c) and optional forced app-close (/f). Accepts either
+  // { graceSeconds } (new monitoring UI) or { delay } (legacy) for the countdown.
+  _powerParams(params) {
+    const raw = typeof params === 'number' ? { delay: params } : (params || {});
+    const grace = Math.max(0, Math.floor(Number(raw.graceSeconds ?? raw.delay ?? 0)) || 0);
+    return { grace, force: !!raw.force, message: raw.message || '' };
+  }
+
+  async shutdownPC(params = {}) {
+    const { grace, force, message } = this._powerParams(params);
+    this.logger.info(`Shutting down PC (grace: ${grace}s, force: ${force})...`);
     try {
-      const cmd = delay > 0 
-        ? `shutdown /s /t ${delay} /c "Shutdown requested by Lab Management System"`
-        : 'shutdown /s /t 0';
+      const warn = (message || `Your instructor is shutting down this PC in ${grace} second(s). Please save your work now.`).replace(/"/g, "'");
+      const cmd = `shutdown /s /t ${grace}${force ? ' /f' : ''} /c "${warn}"`;
       await execAsync(cmd);
-      return { success: true, message: `Shutdown initiated (delay: ${delay}s)` };
+      return { success: true, action: 'shutdown', graceSeconds: grace, force, message: warn };
     } catch (error) {
-      throw new Error('Failed to shutdown: ' + error.message);
+      const denied = /access is denied|\(5\)/i.test(error.message || '');
+      throw new Error(denied ? 'Shutdown failed: access denied (run the agent as Administrator).' : 'Failed to shutdown: ' + error.message);
     }
   }
 
-  async restartPC(delay = 0) {
-    this.logger.info(`Restarting PC (delay: ${delay}s)...`);
+  async restartPC(params = {}) {
+    const { grace, force, message } = this._powerParams(params);
+    this.logger.info(`Restarting PC (grace: ${grace}s, force: ${force})...`);
     try {
-      const cmd = delay > 0 
-        ? `shutdown /r /t ${delay} /c "Restart requested by Lab Management System"`
-        : 'shutdown /r /t 0';
+      const warn = (message || `Your instructor is restarting this PC in ${grace} second(s). Please save your work now.`).replace(/"/g, "'");
+      const cmd = `shutdown /r /t ${grace}${force ? ' /f' : ''} /c "${warn}"`;
       await execAsync(cmd);
-      return { success: true, message: `Restart initiated (delay: ${delay}s)` };
+      return { success: true, action: 'restart', graceSeconds: grace, force, message: warn };
     } catch (error) {
-      throw new Error('Failed to restart: ' + error.message);
+      const denied = /access is denied|\(5\)/i.test(error.message || '');
+      throw new Error(denied ? 'Restart failed: access denied (run the agent as Administrator).' : 'Failed to restart: ' + error.message);
+    }
+  }
+
+  // Cancel a pending shutdown/restart within its countdown window (shutdown /a).
+  async abortShutdown() {
+    this.logger.info('Aborting pending shutdown/restart...');
+    try {
+      await execAsync('shutdown /a');
+      return { success: true, action: 'abort_shutdown', aborted: true, message: 'Pending power action aborted.' };
+    } catch (error) {
+      const detail = error.message || '';
+      if (/1116|no shutdown was in progress/i.test(detail)) {
+        return { success: true, action: 'abort_shutdown', aborted: false, message: 'No pending shutdown to abort.' };
+      }
+      const denied = /access is denied|\(5\)/i.test(detail);
+      throw new Error(denied ? 'Abort failed: access denied (run the agent as Administrator).' : 'Failed to abort: ' + detail);
     }
   }
 

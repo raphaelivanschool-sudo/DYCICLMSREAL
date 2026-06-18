@@ -3,17 +3,16 @@ import { Monitor, RefreshCw, Search, AlertCircle, Radio, Power } from 'lucide-re
 import networkApi from '../../services/network-api.js';
 import { agentsApi } from '../../services/api.js';
 import socketService from '../../services/socketService.js';
+import useScreenProjection, {
+  clampNum,
+  PROJECTION_DEFAULTS,
+  PROJECTION_FPS_RANGE,
+  PROJECTION_QUALITY_RANGE,
+} from '../../hooks/useScreenProjection.js';
 
 const RESULT_TIMEOUT_MS = 90000;
 const SCREENSHOT_AUTO_MS = 3000;
 const SCAN_POLL_MS = 1500;
-
-// Locked Demo Mode capture defaults / ranges (host screen broadcast).
-const PROJECTION_DEFAULTS = { fps: 12, quality: 60, maxWidth: 1280 };
-const PROJECTION_FPS_RANGE = { min: 5, max: 20 };
-const PROJECTION_QUALITY_RANGE = { min: 30, max: 85 };
-const PROJECTION_PING_MS = 2000; // host heartbeat to keep guest watchdogs alive
-const PROJECTION_PREVIEW_EVERY = 4; // refresh self-preview every N frames
 
 const GUEST_STATE_STYLES = {
   connecting: 'bg-amber-100 text-amber-800',
@@ -23,29 +22,6 @@ const GUEST_STATE_STYLES = {
   offline: 'bg-gray-100 text-gray-500',
   error: 'bg-red-100 text-red-800',
 };
-
-function clampNum(raw, { min, max }, fallback) {
-  const n = parseInt(raw, 10);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.min(max, Math.max(min, n));
-}
-
-function blobToBase64(blob) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      const s = reader.result;
-      if (typeof s === 'string') {
-        const idx = s.indexOf(',');
-        resolve(idx >= 0 ? s.slice(idx + 1) : s);
-      } else {
-        reject(new Error('Invalid read result'));
-      }
-    };
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(blob);
-  });
-}
 
 /** Attach agent UUID to scan/broadcast rows when an online agent reports the same LAN IP (or ipAddresses). */
 function mergeAgentIdsOntoScanRows(prevByIp, connectedDevices) {
@@ -97,26 +73,28 @@ function DeveloperModePage() {
   const [diagnosing, setDiagnosing] = useState(false);
   const [overlayLog, setOverlayLog] = useState(null); // { lines, exists, ... } | { error }
   const [overlayLogFetching, setOverlayLogFetching] = useState(false);
-  // Locked Demo Mode (host screen broadcast) state.
-  const [projectionSession, setProjectionSession] = useState(null); // { sessionId, perGuest, config }
-  const [projectionStatus, setProjectionStatus] = useState('');
+  // Locked Demo Mode (host screen broadcast) — shared capture/broadcast engine.
+  const {
+    projectionSession,
+    projectionActive,
+    projectionStatus,
+    startProjection,
+    stopProjection,
+    selfPreviewUrl,
+    hostEmitStats,
+    projFps,
+    setProjFps,
+    projQuality,
+    setProjQuality,
+    projMaxWidth,
+    setProjMaxWidth,
+    guestStateById,
+    projectingCount,
+    failedCount,
+    totalGuests,
+  } = useScreenProjection();
   const [selectedRows, setSelectedRows] = useState(() => new Set()); // agentIds checked
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [projFps, setProjFps] = useState(PROJECTION_DEFAULTS.fps);
-  const [projQuality, setProjQuality] = useState(PROJECTION_DEFAULTS.quality);
-  const [projMaxWidth, setProjMaxWidth] = useState(PROJECTION_DEFAULTS.maxWidth);
-  const [selfPreviewUrl, setSelfPreviewUrl] = useState('');
-  const [hostEmitStats, setHostEmitStats] = useState(null); // { fps, kbps } emitted by this browser (Phase 1 diagnostics)
-  const projectionRunningRef = useRef(false);
-  const projectionSessionIdRef = useRef(null);
-  const projectionFrameTimerRef = useRef(null);
-  const projectionPingTimerRef = useRef(null);
-  const projectionStatsTimerRef = useRef(null);
-  const projectionStreamRef = useRef(null);
-  const projectionSeqRef = useRef(0);
-  const projectionEmitCountRef = useRef(0); // frames emitted since last 1s sample
-  const projectionEmitBytesRef = useRef(0); // base64 bytes emitted since last 1s sample
-  const projectionActive = projectionSession != null;
   const selectedAgentIdRef = useRef(null);
   const commandTargetComputerIdRef = useRef(null);
   const pendingScreenshotCommandRef = useRef(false);
@@ -401,12 +379,6 @@ function DeveloperModePage() {
     [selectedRows, onlineAgentIds],
   );
 
-  const guestStateById = useMemo(() => {
-    const map = {};
-    (projectionSession?.perGuest || []).forEach((g) => { map[g.id] = g; });
-    return map;
-  }, [projectionSession]);
-
   const toggleRowSelect = useCallback((agentId) => {
     if (!agentId) return;
     setSelectedRows((prev) => {
@@ -416,207 +388,6 @@ function DeveloperModePage() {
       return next;
     });
   }, []);
-
-  const teardownCapture = useCallback(() => {
-    projectionRunningRef.current = false;
-    if (projectionFrameTimerRef.current != null) {
-      window.clearInterval(projectionFrameTimerRef.current);
-      projectionFrameTimerRef.current = null;
-    }
-    if (projectionPingTimerRef.current != null) {
-      window.clearInterval(projectionPingTimerRef.current);
-      projectionPingTimerRef.current = null;
-    }
-    if (projectionStatsTimerRef.current != null) {
-      window.clearInterval(projectionStatsTimerRef.current);
-      projectionStatsTimerRef.current = null;
-    }
-    projectionEmitCountRef.current = 0;
-    projectionEmitBytesRef.current = 0;
-    setHostEmitStats(null);
-    const pack = projectionStreamRef.current;
-    projectionStreamRef.current = null;
-    if (pack?.stream) pack.stream.getTracks().forEach((t) => t.stop());
-    setSelfPreviewUrl((prev) => {
-      if (prev) URL.revokeObjectURL(prev);
-      return '';
-    });
-  }, []);
-
-  const stopProjection = useCallback(
-    ({ silent = false } = {}) => {
-      const sessionId = projectionSessionIdRef.current;
-      teardownCapture();
-      projectionSessionIdRef.current = null;
-      setProjectionSession(null);
-      if (sessionId) socketService.stopProjection({ session_id: sessionId }, () => {});
-      if (!silent) setProjectionStatus('■ Projection stopped.');
-    },
-    [teardownCapture],
-  );
-
-  const startProjection = useCallback(
-    async (targets) => {
-      if (projectionRunningRef.current) {
-        setProjectionStatus('✗ Projection already running. Stop it first.');
-        return;
-      }
-      if (!navigator.mediaDevices?.getDisplayMedia) {
-        setProjectionStatus('✗ Screen capture is not supported in this browser.');
-        return;
-      }
-      const targetCount = targets === 'all' ? onlineAgentCount : targets.length;
-      if (targetCount === 0) {
-        setProjectionStatus('✗ No online agents to project to.');
-        return;
-      }
-      if (!socketService.connected()) socketService.connect();
-
-      setProjectionStatus('Select a window/screen to share…');
-      let stream;
-      try {
-        stream = await navigator.mediaDevices.getDisplayMedia({
-          video: { frameRate: projFps },
-          audio: false,
-        });
-      } catch (e) {
-        setProjectionStatus(`✗ Screen share cancelled or denied: ${e?.message || e}`);
-        return;
-      }
-
-      const video = document.createElement('video');
-      video.srcObject = stream;
-      video.muted = true;
-      try {
-        await video.play();
-      } catch (e) {
-        stream.getTracks().forEach((t) => t.stop());
-        setProjectionStatus(`✗ Could not start capture: ${e?.message || e}`);
-        return;
-      }
-
-      const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d');
-      projectionStreamRef.current = { stream, video, canvas, ctx };
-      projectionRunningRef.current = true;
-      projectionSeqRef.current = 0;
-
-      // host stops sharing via the browser's own "Stop sharing" control
-      const track = stream.getVideoTracks()[0];
-      track?.addEventListener('ended', () => stopProjection({ silent: false }));
-
-      const sendFrame = () => {
-        const sid = projectionSessionIdRef.current;
-        const pack = projectionStreamRef.current;
-        if (!projectionRunningRef.current || !pack || !sid) return;
-        const { video: v, canvas: c, ctx: cctx } = pack;
-        const vw = v.videoWidth;
-        const vh = v.videoHeight;
-        if (!vw || !vh) return;
-        let tw = vw;
-        let th = vh;
-        if (tw > projMaxWidth) {
-          const scale = projMaxWidth / tw;
-          tw = Math.round(tw * scale);
-          th = Math.round(th * scale);
-        }
-        c.width = tw;
-        c.height = th;
-        cctx.drawImage(v, 0, 0, tw, th);
-        c.toBlob(
-          async (blob) => {
-            if (!blob || !projectionRunningRef.current) return;
-            const b64 = await blobToBase64(blob);
-            const seq = (projectionSeqRef.current += 1);
-            socketService.sendProjectionFrame({ session_id: sid, seq, w: tw, h: th, screenshot: b64 });
-            projectionEmitCountRef.current += 1;
-            projectionEmitBytesRef.current += b64.length;
-            if (seq % PROJECTION_PREVIEW_EVERY === 0) {
-              const url = URL.createObjectURL(blob);
-              setSelfPreviewUrl((prev) => {
-                if (prev) URL.revokeObjectURL(prev);
-                return url;
-              });
-            }
-          },
-          'image/jpeg',
-          projQuality / 100,
-        );
-      };
-
-      const beginLoops = () => {
-        const frameMs = Math.round(1000 / projFps);
-        projectionFrameTimerRef.current = window.setInterval(sendFrame, frameMs);
-        projectionPingTimerRef.current = window.setInterval(() => {
-          const sid = projectionSessionIdRef.current;
-          if (sid) socketService.sendProjectionPing({ session_id: sid, ts: Date.now() });
-        }, PROJECTION_PING_MS);
-        // Phase 1 diagnostics: sample this browser's actual emit rate once a second.
-        // This is hop #1 — if it sits near projFps the host IS sending continuously.
-        let lastSampleTs = Date.now();
-        projectionStatsTimerRef.current = window.setInterval(() => {
-          const now = Date.now();
-          const dt = Math.max(0.001, (now - lastSampleTs) / 1000);
-          lastSampleTs = now;
-          const fps = Math.round((projectionEmitCountRef.current / dt) * 10) / 10;
-          const kbps = Math.round(projectionEmitBytesRef.current / dt / 1024);
-          projectionEmitCountRef.current = 0;
-          projectionEmitBytesRef.current = 0;
-          setHostEmitStats({ fps, kbps });
-          console.log(`[Projection] host emit ${fps} fps, ${kbps} KB/s`);
-        }, 1000);
-        sendFrame();
-      };
-
-      setProjectionStatus('Starting projection…');
-      socketService.startProjection(
-        { targets, fps: projFps, quality: projQuality, maxWidth: projMaxWidth },
-        (res) => {
-          if (!res?.ok) {
-            teardownCapture();
-            setProjectionStatus(`✗ ${res?.error || 'Server rejected projection.'}`);
-            return;
-          }
-          projectionSessionIdRef.current = res.sessionId;
-          setProjectionSession({
-            sessionId: res.sessionId,
-            perGuest: res.perGuest || [],
-            config: res.config,
-          });
-          setProjectionStatus(`🖥️ Projecting to ${targetCount} PC(s)…`);
-          beginLoops();
-        },
-      );
-    },
-    [projFps, projQuality, projMaxWidth, onlineAgentCount, teardownCapture, stopProjection],
-  );
-
-  // Live per-guest status pushed by the server.
-  useEffect(() => {
-    const unsub = socketService.on('projection:status', (data) => {
-      setProjectionSession((prev) => {
-        if (!prev || !data) return prev;
-        if (data.session_id && prev.sessionId && data.session_id !== prev.sessionId) return prev;
-        return {
-          ...prev,
-          perGuest: data.perGuest || prev.perGuest,
-          config: data.config || prev.config,
-          host: data.host || prev.host, // server-side recv/relay FPS (Phase 1 diagnostics)
-        };
-      });
-    });
-    return unsub;
-  }, []);
-
-  // Tear down capture (and tell the server to stop) if the page unmounts.
-  useEffect(
-    () => () => {
-      teardownCapture();
-      const sid = projectionSessionIdRef.current;
-      if (sid) socketService.stopProjection({ session_id: sid }, () => {});
-    },
-    [teardownCapture],
-  );
 
   const runDiscovery = async () => {
     setDiscovering(true);
@@ -800,14 +571,6 @@ function DeveloperModePage() {
     }
   };
 
-  const projectingCount = (projectionSession?.perGuest || []).filter(
-    (g) => g.state === 'projecting' || g.state === 'connecting',
-  ).length;
-  const failedCount = (projectionSession?.perGuest || []).filter(
-    (g) => g.state === 'error' || g.state === 'offline',
-  ).length;
-  const totalGuests = projectionSession?.perGuest?.length || 0;
-
   return (
     <div className="space-y-6">
       {projectionActive && (
@@ -926,7 +689,7 @@ function DeveloperModePage() {
           <div className="flex flex-wrap items-center gap-3">
             <button
               type="button"
-              onClick={() => startProjection('all')}
+              onClick={() => startProjection('all', onlineAgentCount)}
               disabled={projectionActive || onlineAgentCount === 0}
               className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed"
             >
@@ -993,9 +756,7 @@ function DeveloperModePage() {
             </div>
           )}
           {projectionStatus && (
-            <p className={`text-sm ${projectionStatus.startsWith('✗') ? 'text-red-700' : 'text-violet-900'}`}>
-              {projectionStatus}
-            </p>
+            <p className="text-sm text-violet-900">{projectionStatus}</p>
           )}
           {projectionActive && (
             <div className="mt-2 rounded-md border border-violet-200 bg-violet-50 px-3 py-2 text-xs text-violet-900">

@@ -626,10 +626,13 @@ async function executeCommand(command) {
         await logoutUser();
         break;
       case 'restart':
-        await restartComputer();
+        result = await restartComputer(params);
         break;
       case 'shutdown':
-        await shutdownComputer();
+        result = await shutdownComputer(params);
+        break;
+      case 'abort_shutdown':
+        result = await abortShutdown();
         break;
       case 'message':
         await showMessage(params.message);
@@ -1330,37 +1333,115 @@ async function logoutUser() {
   });
 }
 
-// Restart computer (Windows)
-async function restartComputer() {
-  return new Promise((resolve) => {
-    if (process.platform === 'win32') {
-      exec('shutdown /r /t 0', (error) => {
-        if (error) {
-          console.error('Error restarting computer:', error);
-        }
-        resolve();
-      });
-    } else {
-      console.log('Restart command not implemented for this platform');
-      resolve();
-    }
+// --- Power actions (restart / shutdown / abort) ----------------------------
+// SAFE BY DEFAULT: these schedule a GRACEFUL action with a visible countdown the
+// guest sees (Windows' own shutdown warning, plus a custom /c message), so the
+// student can save work — never an instant kill unless an explicit grace of 0 is
+// requested. The instructor can cancel within the window via abortShutdown().
+// Unlike the old immediate versions, these REJECT on failure so command_result
+// reports success:false with a clear reason (e.g. privilege errors) instead of
+// silently doing nothing.
+
+/** Clamp a requested grace period (seconds) to a sane range. */
+function normalizeGrace(value) {
+  const n = Math.floor(Number(value));
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return Math.min(n, 86400); // cap at 24h (shutdown.exe's own limit is 10 years; 24h is plenty)
+}
+
+/**
+ * Build + run a Windows shutdown.exe power command.
+ * @param {string} flag '/r' (restart) or '/s' (shutdown)
+ * @param {{ graceSeconds:number, force:boolean, message:string }} opts
+ * @param {string} label human label for error messages ('Restart' | 'Shutdown')
+ */
+function runPowerCommand(flag, { graceSeconds, force, message }, label) {
+  const grace = normalizeGrace(graceSeconds);
+  const parts = ['shutdown', flag, '/t', String(grace)];
+  // /f forces apps to close (the explicit, data-loss-prone "force" variant).
+  if (force) parts.push('/f');
+  // /c shows the warning text in the Windows shutdown notification during the
+  // countdown. Quotes are stripped to keep the command line well-formed.
+  const warn = String(message || '').slice(0, 500).replace(/"/g, "'");
+  if (warn) parts.push('/c', `"${warn}"`);
+  const cmd = parts.join(' ');
+
+  return new Promise((resolve, reject) => {
+    exec(cmd, (error, _stdout, stderr) => {
+      if (error) {
+        const detail = (stderr || error.message || '').trim();
+        const denied = /access is denied|\(5\)/i.test(detail);
+        reject(
+          new Error(
+            denied
+              ? `${label} failed: access denied. The agent needs the shutdown privilege — run pc-agent as Administrator.`
+              : `${label} failed: ${detail || 'unknown error'}`,
+          ),
+        );
+        return;
+      }
+      resolve(grace);
+    });
   });
 }
 
-// Shutdown computer (Windows)
-async function shutdownComputer() {
-  return new Promise((resolve) => {
-    if (process.platform === 'win32') {
-      exec('shutdown /s /t 0', (error) => {
-        if (error) {
-          console.error('Error shutting down computer:', error);
+// Restart computer (Windows) — graceful countdown + on-screen warning by default.
+async function restartComputer(params = {}) {
+  if (process.platform !== 'win32') {
+    throw new Error('Restart is only supported on Windows targets');
+  }
+  const graceSeconds = normalizeGrace(params.graceSeconds ?? params.delay ?? 0);
+  const force = !!params.force;
+  const message =
+    params.message ||
+    `Your instructor is restarting this PC in ${graceSeconds} second(s). Please save your work now.`;
+  await runPowerCommand('/r', { graceSeconds, force, message }, 'Restart');
+  console.log(`Restart scheduled (grace ${graceSeconds}s, force ${force})`);
+  return { success: true, action: 'restart', graceSeconds, force, message };
+}
+
+// Shutdown computer (Windows) — graceful countdown + on-screen warning by default.
+async function shutdownComputer(params = {}) {
+  if (process.platform !== 'win32') {
+    throw new Error('Shutdown is only supported on Windows targets');
+  }
+  const graceSeconds = normalizeGrace(params.graceSeconds ?? params.delay ?? 0);
+  const force = !!params.force;
+  const message =
+    params.message ||
+    `Your instructor is shutting down this PC in ${graceSeconds} second(s). Please save your work now.`;
+  await runPowerCommand('/s', { graceSeconds, force, message }, 'Shutdown');
+  console.log(`Shutdown scheduled (grace ${graceSeconds}s, force ${force})`);
+  return { success: true, action: 'shutdown', graceSeconds, force, message };
+}
+
+// Abort a pending shutdown/restart within its countdown window (shutdown /a).
+async function abortShutdown() {
+  if (process.platform !== 'win32') {
+    throw new Error('Abort is only supported on Windows targets');
+  }
+  return new Promise((resolve, reject) => {
+    exec('shutdown /a', (error, _stdout, stderr) => {
+      if (error) {
+        const detail = (stderr || error.message || '').trim();
+        // 1116 = "Unable to abort … no shutdown was in progress" — benign no-op.
+        if (/1116|no shutdown was in progress/i.test(detail)) {
+          resolve({ success: true, action: 'abort_shutdown', aborted: false, message: 'No pending shutdown to abort.' });
+          return;
         }
-        resolve();
-      });
-    } else {
-      console.log('Shutdown command not implemented for this platform');
-      resolve();
-    }
+        const denied = /access is denied|\(5\)/i.test(detail);
+        reject(
+          new Error(
+            denied
+              ? 'Abort failed: access denied — run pc-agent as Administrator.'
+              : `Abort failed: ${detail || 'unknown error'}`,
+          ),
+        );
+        return;
+      }
+      console.log('Pending shutdown/restart aborted');
+      resolve({ success: true, action: 'abort_shutdown', aborted: true, message: 'Pending power action aborted.' });
+    });
   });
 }
 
