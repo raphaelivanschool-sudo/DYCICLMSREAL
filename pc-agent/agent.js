@@ -649,7 +649,7 @@ async function executeCommand(command) {
         result = await clearWebsiteBlocklist();
         break;
       case 'disable_wifi':
-        result = await disableWifiAdapter(params?.adapterName);
+        result = await disableWifiAdapter(params || {});
         break;
       case 'enable_wifi':
         result = await enableWifiAdapter(params?.adapterName);
@@ -694,13 +694,30 @@ function sanitizeWebsites(websites) {
 }
 
 function buildBlockSection(websites) {
+  // Redirect blocked hosts to 0.0.0.0 (the "no route" sink) rather than
+  // 127.0.0.1 — this avoids the guest's own loopback services answering and
+  // fails the lookup fast on every modern browser.
   const lines = [BLOCK_START_MARKER];
   websites.forEach((site) => {
-    lines.push(`127.0.0.1 ${site}`);
-    lines.push(`127.0.0.1 www.${site}`);
+    lines.push(`0.0.0.0 ${site}`);
+    lines.push(`0.0.0.0 www.${site}`);
   });
   lines.push(BLOCK_END_MARKER);
   return `\n${lines.join('\n')}\n`;
+}
+
+/**
+ * Flush the Windows DNS resolver cache so hosts-file changes take effect
+ * immediately (otherwise a previously-resolved domain stays cached). Best-effort:
+ * a failure here never fails the block/unblock itself.
+ */
+async function flushDns() {
+  if (process.platform !== 'win32') return;
+  try {
+    await execCommand('ipconfig /flushdns');
+  } catch (err) {
+    console.warn('[Hosts] ipconfig /flushdns failed (non-fatal):', err.message);
+  }
 }
 
 function removeManagedSection(content) {
@@ -726,6 +743,7 @@ async function setWebsiteBlocklist(websites) {
     const blockSection = buildBlockSection(sanitized).replace(/\n/g, '\r\n');
     const nextHosts = `${cleanedHosts}${blockSection}`;
     await fs.writeFile(HOSTS_PATH, nextHosts, 'utf8');
+    await flushDns();
     console.log(`Applied website blocklist for ${sanitized.length} site(s)`);
     return { blockedSites: sanitized };
   } catch (error) {
@@ -742,6 +760,7 @@ async function clearWebsiteBlocklist() {
     const currentHosts = await fs.readFile(HOSTS_PATH, 'utf8');
     const cleanedHosts = removeManagedSection(currentHosts);
     await fs.writeFile(HOSTS_PATH, cleanedHosts, 'utf8');
+    await flushDns();
     console.log('Cleared managed website blocklist');
     return { cleared: true };
   } catch (error) {
@@ -761,12 +780,58 @@ async function execCommand(command) {
   });
 }
 
-async function disableWifiAdapter(preferredAdapterName) {
+// --- Wi-Fi anti-lockout: local auto-restore timer ---------------------------
+// Disabling the adapter that carries the agent's own Socket.IO connection severs
+// control — it can no longer be re-enabled remotely. So every disable schedules a
+// LOCAL re-enable on the guest (default 5 min) via setTimeout, which keeps running
+// even after the server connection drops (the timer lives in this process, not on
+// the server). An explicit enable_wifi — or a disable with keepDisabled:true —
+// cancels/replaces it, so a PC is never permanently stranded.
+const WIFI_AUTORESTORE_DEFAULT_MIN = 5;
+let wifiAutoRestoreTimer = null;
+let wifiAutoRestoreAdapter = null;
+let wifiAutoRestoreAt = 0;
+
+function clearWifiAutoRestore() {
+  if (wifiAutoRestoreTimer) {
+    clearTimeout(wifiAutoRestoreTimer);
+    wifiAutoRestoreTimer = null;
+  }
+  wifiAutoRestoreAdapter = null;
+  wifiAutoRestoreAt = 0;
+}
+
+function scheduleWifiAutoRestore(adapterName, minutes) {
+  clearWifiAutoRestore();
+  const mins =
+    Number.isFinite(Number(minutes)) && Number(minutes) > 0
+      ? Number(minutes)
+      : WIFI_AUTORESTORE_DEFAULT_MIN;
+  const ms = mins * 60 * 1000;
+  wifiAutoRestoreAdapter = adapterName;
+  wifiAutoRestoreAt = Date.now() + ms;
+  wifiAutoRestoreTimer = setTimeout(async () => {
+    console.log(`[WiFi] Auto-restore firing (anti-lockout) for adapter "${adapterName}"`);
+    try {
+      await enableWifiAdapter(adapterName);
+      console.log('[WiFi] Auto-restore: adapter re-enabled');
+    } catch (err) {
+      console.error('[WiFi] Auto-restore failed:', err.message);
+    } finally {
+      clearWifiAutoRestore();
+    }
+  }, ms);
+  return mins;
+}
+
+async function disableWifiAdapter(options = {}) {
   if (process.platform !== 'win32') {
     throw new Error('Wi-Fi control is only supported on Windows targets');
   }
 
-  const preferred = String(preferredAdapterName || '').trim();
+  // Backwards compatible: a bare adapter-name string is still accepted.
+  const opts = typeof options === 'string' ? { adapterName: options } : (options || {});
+  const preferred = String(opts.adapterName || '').trim();
   const escapedPreferred = preferred.replace(/'/g, "''");
 
   const discoverScript = preferred
@@ -783,11 +848,25 @@ async function disableWifiAdapter(preferredAdapterName) {
   const disableScript = `Disable-NetAdapter -Name '${escapedName}' -Confirm:$false -PassThru | Out-Null`;
   await execCommand(`powershell -NoProfile -Command "${disableScript}"`);
 
+  // Anti-lockout: schedule a local re-enable unless the instructor explicitly
+  // chose to keep it disabled. This survives losing the server connection.
+  const keepDisabled = opts.keepDisabled === true;
+  let autoRestoreMinutes = null;
+  if (keepDisabled) {
+    clearWifiAutoRestore();
+  } else {
+    autoRestoreMinutes = scheduleWifiAutoRestore(adapterName, opts.autoRestoreMinutes);
+  }
+
   return {
     success: true,
     disabled: true,
     adapter: adapterName,
-    message: `Disabled Wi-Fi adapter: ${adapterName}`
+    keepDisabled,
+    autoRestoreMinutes,
+    message: keepDisabled
+      ? `Disabled Wi-Fi adapter "${adapterName}" (kept disabled — no auto-restore)`
+      : `Disabled Wi-Fi adapter "${adapterName}"; auto-restore in ${autoRestoreMinutes} min`,
   };
 }
 
@@ -795,6 +874,9 @@ async function enableWifiAdapter(preferredAdapterName) {
   if (process.platform !== 'win32') {
     throw new Error('Wi-Fi control is only supported on Windows targets');
   }
+
+  // An explicit enable supersedes any pending anti-lockout auto-restore.
+  clearWifiAutoRestore();
 
   const preferred = String(preferredAdapterName || '').trim();
   const escapedPreferred = preferred.replace(/'/g, "''");

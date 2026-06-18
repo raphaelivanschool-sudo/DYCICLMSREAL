@@ -1,188 +1,134 @@
 import { useState, useEffect } from 'react';
 import { gradingService } from '../../services/gradingService';
-import { ClipboardList } from 'lucide-react';
-
-const REMARKS_STYLE = {
-  PASSED:      'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400',
-  CONDITIONAL: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400',
-  FAILED:      'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',
-  INC:         'bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400',
-  DROPPED:     'bg-zinc-100 text-zinc-400 dark:bg-zinc-800 dark:text-zinc-500',
-};
-
-function gradeColor(g) {
-  if (g == null) return 'text-zinc-400';
-  if (g <= 2.00) return 'text-emerald-600 dark:text-emerald-400';
-  if (g <= 3.00) return 'text-blue-600 dark:text-blue-400';
-  if (g === 4.00) return 'text-amber-600 dark:text-amber-400';
-  return 'text-red-600 dark:text-red-400';
-}
+import { ClipboardList, ChevronDown, ChevronRight, CalendarRange, MessageSquareText } from 'lucide-react';
+import { fmtGrade, fmtPct, gradeColor, REMARK_STYLE, STATUS_STYLE, STATUS_LABEL } from '../../utils/gradeUi';
 
 export default function MyGrades() {
-  const [grades,  setGrades]  = useState([]);
+  const [semesters, setSemesters] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [expanded, setExpanded] = useState({});
 
   useEffect(() => {
     gradingService.getMyGrades()
-      .then((r) => setGrades(r.data))
+      .then((r) => setSemesters(r.data))
       .finally(() => setLoading(false));
   }, []);
 
-  const passed = grades.filter((g) => g.remarks === 'PASSED').length;
-  const validGrades = grades
-    .map((g) => g.transmutedGrade)
-    .filter((v) => v != null);
-  const gwa = validGrades.length > 0
-    ? (validGrades.reduce((a, b) => a + b, 0) / validGrades.length).toFixed(2)
-    : null;
-
-  function gwaColor(v) {
-    if (v == null) return 'text-zinc-400';
-    const n = parseFloat(v);
-    if (n <= 2.00) return 'text-emerald-600 dark:text-emerald-400';
-    if (n <= 3.00) return 'text-blue-600 dark:text-blue-400';
-    return 'text-red-600 dark:text-red-400';
-  }
+  const toggle = (id) => setExpanded((p) => ({ ...p, [id]: !p[id] }));
+  const hasAny = semesters.some((s) => s.subjects.length > 0);
 
   return (
-    <div className="p-8 max-w-7xl mx-auto">
+    <div className="p-8 max-w-5xl mx-auto">
       <div className="mb-8">
         <div className="flex items-center gap-3 mb-1">
           <ClipboardList size={22} className="text-blue-600" />
-          <h1 className="text-2xl font-semibold text-zinc-900 dark:text-zinc-100">
-            My Grades
-          </h1>
+          <h1 className="text-2xl font-semibold text-zinc-900 dark:text-zinc-100">My Grades</h1>
         </div>
-        <p className="text-sm text-zinc-500 dark:text-zinc-400 ml-9">
-          Your academic performance this term
-        </p>
+        <p className="text-sm text-zinc-500 dark:text-zinc-400 ml-9">Your academic performance, by semester</p>
       </div>
 
-      {/* Summary stats */}
-      {!loading && grades.length > 0 && (
-        <div className="grid grid-cols-3 gap-4 mb-8">
-          {[
-            {
-              label: 'Subjects enrolled',
-              value: grades.length,
-              color: 'text-zinc-900 dark:text-zinc-100',
-            },
-            {
-              label: 'Subjects passed',
-              value: passed,
-              color: 'text-emerald-600 dark:text-emerald-400',
-            },
-            {
-              label: 'GWA',
-              value: gwa ?? '—',
-              color: gwaColor(gwa),
-            },
-          ].map((stat) => (
-            <div key={stat.label}
-              className="bg-white dark:bg-zinc-900 border border-zinc-200
-                         dark:border-zinc-800 rounded-2xl p-5">
-              <p className="text-xs font-medium uppercase tracking-wide
-                            text-zinc-400 mb-1">
-                {stat.label}
-              </p>
-              <p className={`text-2xl font-semibold font-mono ${stat.color}`}>
-                {stat.value}
-              </p>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Loading skeletons */}
-      {loading && (
-        <div className="bg-white dark:bg-zinc-900 border border-zinc-200
-                        dark:border-zinc-800 rounded-2xl overflow-hidden">
-          <table className="w-full text-sm">
-            <tbody>
-              {Array.from({ length: 3 }).map((_, i) => (
-                <tr key={i} className="border-b border-zinc-100 dark:border-zinc-800">
-                  {Array.from({ length: 6 }).map((__, j) => (
-                    <td key={j} className="px-5 py-4">
-                      <div className="animate-pulse bg-zinc-100 dark:bg-zinc-800
-                                      rounded h-5 w-full" />
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {/* Empty state */}
-      {!loading && grades.length === 0 && (
+      {loading ? (
+        <div className="flex flex-col gap-4">{[1, 2].map((i) => <div key={i} className="animate-pulse bg-zinc-100 dark:bg-zinc-800 rounded-2xl h-28" />)}</div>
+      ) : !hasAny ? (
         <div className="flex flex-col items-center justify-center py-24 text-center">
-          <ClipboardList size={40}
-            className="text-zinc-300 dark:text-zinc-600 mb-4" />
+          <ClipboardList size={40} className="text-zinc-300 dark:text-zinc-600 mb-4" />
           <p className="text-base font-medium text-zinc-500">No grades available yet</p>
-          <p className="text-sm text-zinc-400 mt-1">
-            Your instructor has not entered any grades for you yet.
-          </p>
+          <p className="text-sm text-zinc-400 mt-1">Your instructor has not entered any grades for you yet.</p>
         </div>
-      )}
+      ) : (
+        <div className="flex flex-col gap-8">
+          {semesters.map((sem) => (
+            <div key={sem.semester.id}>
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2 text-zinc-700 dark:text-zinc-200">
+                  <CalendarRange size={16} className="text-zinc-400" />
+                  <span className="font-semibold">{sem.semester.name}</span>
+                </div>
+                <div className="inline-flex items-center gap-2 bg-zinc-100 dark:bg-zinc-800 px-3 py-1.5 rounded-xl text-sm">
+                  <span className="text-zinc-400">GWA:</span>
+                  <span className={`font-semibold font-mono ${gradeColor(sem.gwa)}`}>{sem.gwa != null ? sem.gwa.toFixed(2) : '—'}</span>
+                </div>
+              </div>
 
-      {/* Grades table */}
-      {!loading && grades.length > 0 && (
-        <div className="bg-white dark:bg-zinc-900 border border-zinc-200
-                        dark:border-zinc-800 rounded-2xl overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm border-collapse">
-              <thead>
-                <tr className="bg-zinc-50 dark:bg-zinc-800/60 border-b
-                               border-zinc-200 dark:border-zinc-800">
-                  {['Subject','Code','Instructor','Year & Section',
-                    'Grade','Remarks'].map((h) => (
-                    <th key={h}
-                      className="px-5 py-3.5 text-left text-xs font-semibold
-                                 uppercase tracking-wide text-zinc-400 whitespace-nowrap">
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {grades.map((g) => {
-                  const remarks = g.remarks ?? 'INC';
+              <div className="flex flex-col gap-3">
+                {sem.subjects.map((sub) => {
+                  const isOpen = expanded[sub.enrollmentId];
                   return (
-                    <tr key={g.id}
-                      className="border-b border-zinc-100 dark:border-zinc-800
-                                 last:border-0 hover:bg-zinc-50 dark:hover:bg-zinc-800/60
-                                 transition-colors">
-                      <td className="px-5 py-4 font-medium text-zinc-900 dark:text-zinc-100">
-                        {g.subject.name}
-                      </td>
-                      <td className="px-5 py-4">
-                        <span className="font-mono text-xs bg-blue-50 dark:bg-blue-900/30
-                                         text-blue-700 dark:text-blue-400 px-2 py-0.5
-                                         rounded-lg">
-                          {g.subject.code}
-                        </span>
-                      </td>
-                      <td className="px-5 py-4 text-zinc-500">
-                        {g.subject.instructor?.fullName || g.subject.instructor?.name || '—'}
-                      </td>
-                      <td className="px-5 py-4 text-zinc-500">{g.subject.yearSection}</td>
-                      <td className={`px-5 py-4 text-base font-semibold font-mono
-                                      ${gradeColor(g.transmutedGrade)}`}>
-                        {g.transmutedGrade != null ? g.transmutedGrade.toFixed(2) : '—'}
-                      </td>
-                      <td className="px-5 py-4">
-                        <span className={`px-2.5 py-1 rounded-full text-xs font-semibold
-                                         uppercase tracking-wide ${REMARKS_STYLE[remarks]}`}>
-                          {remarks}
-                        </span>
-                      </td>
-                    </tr>
+                    <div key={sub.enrollmentId} className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl overflow-hidden">
+                      <button onClick={() => toggle(sub.enrollmentId)} className="w-full flex items-center justify-between p-5 text-left hover:bg-zinc-50 dark:hover:bg-zinc-800/40 transition-colors">
+                        <div className="flex items-center gap-3">
+                          {isOpen ? <ChevronDown size={16} className="text-zinc-400" /> : <ChevronRight size={16} className="text-zinc-400" />}
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="font-semibold text-zinc-900 dark:text-zinc-100">{sub.subject.title}</span>
+                              <span className="font-mono text-xs bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 px-2 py-0.5 rounded-lg">{sub.subject.code}</span>
+                            </div>
+                            <p className="text-xs text-zinc-400 mt-1">{sub.instructor} · {sub.sectionName} · {sub.subject.units} units</p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-4">
+                          <span className={`px-2.5 py-1 rounded-full text-xs font-semibold ${STATUS_STYLE[sub.gradeStatus]}`}>{STATUS_LABEL[sub.gradeStatus]}</span>
+                          <div className="text-right">
+                            <p className={`text-xl font-bold font-mono ${gradeColor(sub.displayGradePoint, sub.isInc)}`}>{fmtGrade(sub.displayGradePoint, sub.isInc)}</p>
+                            <p className="text-[10px] uppercase tracking-wide text-zinc-400">{sub.finalized ? 'Final' : 'Running'}</p>
+                          </div>
+                        </div>
+                      </button>
+
+                      {isOpen && (
+                        <div className="border-t border-zinc-200 dark:border-zinc-800 p-5 bg-zinc-50/50 dark:bg-zinc-800/20">
+                          <div className="flex items-center justify-between mb-4 text-sm">
+                            <span className="text-zinc-500">Overall: <span className="font-mono text-zinc-700 dark:text-zinc-200">{fmtPct(sub.displayPercentage)}</span></span>
+                            <span className={`px-2.5 py-1 rounded-full text-xs font-semibold ${REMARK_STYLE[sub.remark] || ''}`}>{sub.remark}</span>
+                          </div>
+                          {sub.breakdown.length === 0 ? (
+                            <p className="text-sm text-zinc-400">Your instructor has not set up graded categories yet.</p>
+                          ) : (
+                            <div className="flex flex-col gap-4">
+                              {sub.breakdown.map((cat) => (
+                                <div key={cat.id} className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-xl overflow-hidden">
+                                  <div className="flex items-center justify-between px-4 py-2.5 border-b border-zinc-100 dark:border-zinc-800">
+                                    <span className="text-sm font-medium text-zinc-700 dark:text-zinc-200">{cat.name} <span className="text-xs text-zinc-400">({cat.weight}%)</span></span>
+                                    <span className="text-sm font-mono text-zinc-500">{fmtPct(cat.percentage)}</span>
+                                  </div>
+                                  {cat.activities.length === 0 ? (
+                                    <p className="px-4 py-3 text-xs text-zinc-400">No activities yet.</p>
+                                  ) : (
+                                    <table className="w-full text-sm">
+                                      <tbody>
+                                        {cat.activities.map((a) => (
+                                          <tr key={a.id} className="border-b border-zinc-50 dark:border-zinc-800/50 last:border-0">
+                                            <td className="px-4 py-2.5 text-zinc-700 dark:text-zinc-300">
+                                              {a.title}
+                                              {a.feedback && (
+                                                <span className="inline-flex items-center gap-1 ml-2 text-xs text-blue-600 dark:text-blue-400" title={a.feedback}><MessageSquareText size={12} /> feedback</span>
+                                              )}
+                                              {a.feedback && <p className="text-xs text-zinc-400 mt-0.5 italic">“{a.feedback}”</p>}
+                                            </td>
+                                            <td className="px-4 py-2.5 text-right font-mono whitespace-nowrap">
+                                              {a.graded ? (
+                                                <span className="text-zinc-700 dark:text-zinc-200">{a.rawScore} <span className="text-zinc-400">/ {a.maxScore}</span></span>
+                                              ) : (
+                                                <span className="text-xs text-amber-500">pending</span>
+                                              )}
+                                            </td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   );
                 })}
-              </tbody>
-            </table>
-          </div>
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </div>

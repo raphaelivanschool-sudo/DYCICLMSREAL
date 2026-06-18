@@ -273,6 +273,15 @@ router.get('/connected/:computerId', authenticateToken, (req, res) => {
 // Send command to agent PC (by computer UUID and/or client LAN IP / MAC)
 router.post('/command', authenticateToken, async (req, res) => {
   try {
+    // Agent control is privileged — enforce role server-side, not just in the UI.
+    const role = String(req.user?.role || '').toUpperCase();
+    if (role !== 'ADMIN' && role !== 'INSTRUCTOR') {
+      return res.status(403).json({
+        success: false,
+        error: 'Admin or instructor role required to send agent commands.',
+      });
+    }
+
     const io = req.app.get('io');
     const connectedComputers = req.app.get('connectedComputers');
     const { computerId, ip, mac, action, params } = req.body;
