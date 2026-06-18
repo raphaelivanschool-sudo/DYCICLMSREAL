@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { PrismaClient } from '@prisma/client';
 import { authenticateToken } from '../middleware/auth.js';
+import { recordActivity, clientIp } from '../utils/activityLog.js';
 
 const prisma = new PrismaClient();
 const router = express.Router();
@@ -34,6 +35,11 @@ router.post('/login', async (req, res) => {
 
     if (!user) {
       console.log('DEBUG - User not found, returning 401');
+      await recordActivity(prisma, {
+        action: 'LOGIN_FAILED',
+        description: `Failed login for "${username}" (no such user)`,
+        ipAddress: clientIp(req),
+      });
       return res.status(401).json({ message: 'Invalid credentials' });
     }
 
@@ -45,6 +51,12 @@ router.post('/login', async (req, res) => {
 
     if (!isPasswordValid) {
       console.log('DEBUG - Password invalid, returning 401');
+      await recordActivity(prisma, {
+        action: 'LOGIN_FAILED',
+        description: `Failed login for "${username}" (invalid password)`,
+        userId: user.id,
+        ipAddress: clientIp(req),
+      });
       return res.status(401).json({ message: 'Invalid credentials' });
     }
 

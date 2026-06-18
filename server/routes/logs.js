@@ -1,6 +1,7 @@
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import { authenticateToken, requireRole } from '../middleware/auth.js';
+import { sendCsv, EXPORT_MAX_ROWS } from '../utils/csv.js';
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -55,8 +56,6 @@ const getDateRange = (range) => {
   
   return { start, end: now };
 };
-
-const EXPORT_MAX_ROWS = 25_000;
 
 function normalizeActionFilter(rawActionFilter) {
   return rawActionFilter === undefined ||
@@ -138,13 +137,6 @@ function withLogsStatusFilter(baseWhere, statusFilter) {
   return { AND: [baseWhere, statusClause] };
 }
 
-function csvEscape(value) {
-  if (value === null || value === undefined) return '';
-  const s = String(value);
-  if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
-  return s;
-}
-
 function deriveStatusLabel(action) {
   if (!action) return '';
   if (String(action).includes('ERROR')) return 'Error';
@@ -183,31 +175,19 @@ router.get('/export', authenticateToken, requireRole(['ADMIN', 'INSTRUCTOR']), a
       'IP Address',
       'Status',
     ];
-    const lines = [
-      header.map(csvEscape).join(','),
-      ...rows.map((log) =>
-        [
-          new Date(log.createdAt).toISOString(),
-          log.user?.fullName || 'System',
-          log.user?.username || 'system',
-          log.user?.role || 'SYSTEM',
-          log.action,
-          log.description || '',
-          log.ipAddress || '',
-          deriveStatusLabel(log.action),
-        ]
-          .map(csvEscape)
-          .join(',')
-      ),
-    ];
+    const dataRows = rows.map((log) => [
+      new Date(log.createdAt).toISOString(),
+      log.user?.fullName || 'System',
+      log.user?.username || 'system',
+      log.user?.role || 'SYSTEM',
+      log.action,
+      log.description || '',
+      log.ipAddress || '',
+      deriveStatusLabel(log.action),
+    ]);
 
-    const csv = '\uFEFF' + lines.join('\r\n');
     const stamp = new Date().toISOString().slice(0, 10);
-    const fileSafe = `system-logs-${stamp}.csv`;
-
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="${fileSafe}"`);
-    res.send(csv);
+    sendCsv(res, { filename: `system-logs-${stamp}.csv`, header, rows: dataRows });
   } catch (error) {
     console.error('Error exporting system logs:', error);
     res.status(500).json({

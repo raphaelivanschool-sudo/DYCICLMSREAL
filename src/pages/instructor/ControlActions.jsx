@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Users, CheckCircle, Lock, LockOpen, Monitor, MonitorUp, Wifi, WifiOff,
+  Users, CheckCircle, Lock, MonitorUp, Wifi, WifiOff,
   MessageSquare, Globe, Plus, X, Send, Power, AlertTriangle, RefreshCw,
   Square, CheckSquare, Circle, ShieldOff,
 } from 'lucide-react';
@@ -18,10 +18,7 @@ const DEFAULT_BLOCKLIST = [
 
 const ACTION_LABELS = {
   lock: 'Lock',
-  unlock: 'Unlock',
-  blank_screen: 'Blank screen',
   shutdown: 'Shutdown',
-  abort_shutdown: 'Abort shutdown',
   message: 'Message',
   set_website_blocklist: 'Block websites',
   clear_website_blocklist: 'Unblock websites',
@@ -231,10 +228,7 @@ function ControlActions() {
 
   // ---- Bulk handlers (operate on `targets`) ----
   const handleLock = () => sendToTargets('lock', {}, targets);
-  const handleUnlock = () => sendToTargets('unlock', {}, targets);
-  const handleBlank = () => sendToTargets('blank_screen', {}, targets);
   const handleEnableWifi = () => sendToTargets('enable_wifi', {}, targets);
-  const handleAbortShutdown = () => sendToTargets('abort_shutdown', {}, targets);
 
   const handleConfirmShutdown = async () => {
     const graceSeconds = Math.max(0, Math.min(86400, parseInt(shutdownGrace, 10) || 0));
@@ -393,13 +387,10 @@ function ControlActions() {
           <h2 className="text-lg font-semibold text-gray-900">Quick Commands</h2>
           <span className="text-sm text-gray-500">Applies to <span className="font-medium text-gray-700">{targetLabel}</span></span>
         </div>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
           <ActionTile icon={Lock} label="Lock" color="red" onClick={handleLock} />
-          <ActionTile icon={LockOpen} label="Unlock" color="green" onClick={handleUnlock} />
-          <ActionTile icon={Monitor} label="Blank Screen" color="gray" onClick={handleBlank} />
           <ActionTile icon={MessageSquare} label="Broadcast" color="blue" onClick={() => setShowBroadcast(true)} />
           <ActionTile icon={Power} label="Shutdown" color="red" onClick={() => setShowShutdown(true)} />
-          <ActionTile icon={X} label="Abort Shutdown" color="gray" onClick={handleAbortShutdown} />
           <ActionTile
             icon={MonitorUp}
             label="Project to All"
@@ -711,7 +702,7 @@ function ActionTile({ icon, label, color = 'gray', onClick, disabled }) {
 
 function Modal({ title, children, onClose }) {
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+    <div className="modal-overlay">
       <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4">
         <div className="flex items-center justify-between p-4 border-b border-gray-200">
           <h3 className="text-lg font-semibold text-gray-900">{title}</h3>

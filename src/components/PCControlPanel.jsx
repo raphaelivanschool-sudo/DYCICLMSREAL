@@ -602,7 +602,7 @@ const PCControlPanel = () => {
 
       {/* Settings Modal */}
       {showSettings && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+        <div className="modal-overlay">
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
             <div className="flex items-center justify-between p-4 border-b">
               <div className="flex items-center gap-2">
@@ -776,7 +776,7 @@ const PCControlPanel = () => {
 
       {/* VNC Viewer Modal */}
       {showVNC && selectedPC && (
-        <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4">
+        <div className="fixed inset-0 bg-black/75 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-5xl overflow-hidden">
             {/* Header */}
             <div className="bg-gray-900 text-white p-4 flex items-center justify-between">

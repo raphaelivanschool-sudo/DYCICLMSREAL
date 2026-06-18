@@ -11,6 +11,8 @@ import dgram from "dgram";
 import os from "os";
 import { projectionManager } from "./utils/projectionSession.js";
 import { recordActivity } from "./utils/activityLog.js";
+import { recordPresence, touchAgentSeen } from "./utils/presenceLog.js";
+import { recordControlAction } from "./utils/controlLog.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -207,6 +209,10 @@ io.on("connection", (socket) => {
       // Acknowledge registration
       socket.emit("agent_registered", { success: true });
 
+      // Persist an ONLINE presence transition + keep the Agent row current
+      // (usage-report history). Best-effort: never blocks the socket path.
+      recordPresence(prisma, computerData, "ONLINE");
+
       // Late joiner: if a projection is active, resync this agent (broadcast sessions).
       projectionManager.onAgentRegister(computerData.id);
     });
@@ -224,6 +230,16 @@ io.on("connection", (socket) => {
     socket.on("projection_stats", (data) => {
       const { session_id, ...stats } = data || {};
       projectionManager.recordGuestStats({ socketId: socket.id, sessionId: session_id, stats });
+    });
+
+    // PC Agent: keep-alive — refresh the Agent row's lastSeen (no new
+    // presence row; transitions are logged on register/disconnect only).
+    socket.on("agent_heartbeat", (data) => {
+      const computer = connectedComputers.get(data?.computerId);
+      if (computer) {
+        computer.lastSeen = new Date();
+        touchAgentSeen(prisma, computer.computer);
+      }
     });
 
     // PC Agent: Handle status updates
@@ -245,6 +261,9 @@ io.on("connection", (socket) => {
           }
           if (statusData.hostname) c.hostname = statusData.hostname;
         }
+
+        // Refresh the Agent row's lastSeen for utilization reports.
+        touchAgentSeen(prisma, c);
 
         // Broadcast status update to instructors
         socket.broadcast.emit("computer_status_update", {
@@ -293,6 +312,9 @@ io.on("connection", (socket) => {
         if (computer.socketId === socket.id) {
           console.log(`[Agent] Disconnected: ${computer.computer.name}`);
           connectedComputers.delete(computerId);
+
+          // Persist an OFFLINE presence transition + flip the Agent row.
+          recordPresence(prisma, computer.computer, "OFFLINE");
 
           // If this guest was in a projection, mark it offline (others continue).
           projectionManager.onAgentDisconnect(computerId);
@@ -362,6 +384,15 @@ io.on("connection", (socket) => {
         }) — session ${res.sessionId}`,
         ipAddress: socket.handshake?.address || null,
       });
+      recordControlAction(prisma, {
+        actorId: socket.user.id,
+        actorRole: socket.user.role,
+        action: "project",
+        result: "SENT",
+        detail: `Projection start — ${
+          targets === "all" ? "all online" : `${(res.perGuest || []).length} selected`
+        }, session ${res.sessionId}`,
+      });
     }
     if (typeof ack === "function") ack(res);
   });
@@ -388,6 +419,13 @@ io.on("connection", (socket) => {
         action: "SCREEN_PROJECTION_STOP",
         description: `Stopped Locked Demo Mode — session ${res.sessionId}`,
         ipAddress: socket.handshake?.address || null,
+      });
+      recordControlAction(prisma, {
+        actorId: socket.user.id,
+        actorRole: socket.user.role,
+        action: "projection-stop",
+        result: "SENT",
+        detail: `Projection stop — session ${res.sessionId}`,
       });
     }
     if (typeof ack === "function") ack(res);
@@ -596,6 +634,7 @@ import schedulesRoutes from "./routes/schedules.js";
 import gradingRoutes from "./routes/grading.js";
 import networkRoutes from "./routes/network.js";
 import logsRoutes from "./routes/logs.js";
+import reportsRoutes from "./routes/reports.js";
 import agentsRoutes from "./routes/agents.js";
 import sessionContextRoutes from "./routes/session-context.js";
 import { authenticateToken } from "./middleware/auth.js";
@@ -611,6 +650,7 @@ app.use("/api/schedules", authenticateToken, schedulesRoutes);
 app.use("/api/grading", authenticateToken, gradingRoutes);
 app.use("/api/network", authenticateToken, networkRoutes);
 app.use("/api/logs", authenticateToken, logsRoutes);
+app.use("/api/reports", authenticateToken, reportsRoutes);
 app.use("/api/agents", authenticateToken, agentsRoutes);
 app.use("/api/session-context", authenticateToken, sessionContextRoutes);
 

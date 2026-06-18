@@ -35,6 +35,7 @@ model User {
   gradedScores    Score[]         @relation("ScoreGrader")
   gradeAuditLogs  GradeAuditLog[]
   agentActivityLogs AgentActivityLog[]
+  controlActions  ControlActionLog[] @relation("ControlActor")
 }
 
 model Laboratory {
@@ -523,6 +524,7 @@ model Agent {
   lastSeen        DateTime?
   registeredAt    DateTime        @default(now())
   activityLogs    AgentActivityLog[]
+  presenceLogs    AgentPresenceLog[]
 
   @@index([status])
   @@index([lastSeen])
@@ -543,6 +545,54 @@ model AgentActivityLog {
 }
 
 enum AgentStatus {
+  ONLINE
+  OFFLINE
+}
+
+// ============================================================
+// Usage-reporting event history (Stage 1 of System-Usage Reports)
+// ============================================================
+
+// Online/offline transitions per agent, so lab/PC utilization and
+// attendance can be computed over time. Transition-only (no heartbeat
+// rows): online intervals = each ONLINE paired with the next OFFLINE.
+model AgentPresenceLog {
+  id        Int           @id @default(autoincrement())
+  agentId   Int?          // FK to Agent when resolvable by mac
+  agent     Agent?        @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  agentKey  String        // stable identity: mac, else reported computerId/hostname
+  hostname  String?
+  ipAddress String?
+  mac       String?
+  event     PresenceEvent
+  at        DateTime      @default(now())
+
+  @@index([agentKey, at])
+  @@index([at])
+}
+
+// Denormalized snapshot of every remote control command issued
+// (lock/shutdown/restart/project/wifi/website-block/wake/screenshot…),
+// so the Control Action Log report does not depend on joins that may
+// be missing for freshly discovered guests.
+model ControlActionLog {
+  id               Int      @id @default(autoincrement())
+  actorId          Int?
+  actor            User?    @relation("ControlActor", fields: [actorId], references: [id])
+  actorRole        String?
+  action           String
+  targetComputerId String?
+  targetHostname   String?
+  targetIp         String?
+  result           String   // SENT | EXECUTED | FAILED | <error>
+  detail           String?  @db.Text
+  createdAt        DateTime @default(now())
+
+  @@index([actorId])
+  @@index([createdAt])
+}
+
+enum PresenceEvent {
   ONLINE
   OFFLINE
 }

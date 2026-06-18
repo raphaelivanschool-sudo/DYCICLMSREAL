@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { io } from 'socket.io-client';
-import { Send, Search, MessageCircle, Phone, Video, MoreVertical, Smile, Paperclip } from 'lucide-react';
+import { Send, Search, MessageCircle, Smile, Paperclip } from 'lucide-react';
 import messagingService from '../../services/messagingService';
 
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:3001';
@@ -361,17 +361,6 @@ function Messaging() {
                           : 'Offline'}
                     </p>
                   </div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
-                    <Phone className="w-4 h-4 text-gray-500" />
-                  </button>
-                  <button className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
-                    <Video className="w-4 h-4 text-gray-500" />
-                  </button>
-                  <button className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
-                    <MoreVertical className="w-4 h-4 text-gray-500" />
-                  </button>
                 </div>
               </div>
 

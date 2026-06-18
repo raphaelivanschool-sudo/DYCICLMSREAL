@@ -1,1 +1,25 @@
 @import "tailwindcss";
+
+/*
+ * Shared modal/dialog backdrop. Single source of truth so every modal across the
+ * app gets the same dimmed + blurred translucent overlay (the page stays visible
+ * behind it) instead of a solid black screen. New modals should use this class.
+ *
+ * NOTE: this also fixes a Tailwind v4 regression — the old `bg-black bg-opacity-50`
+ * pattern no longer works in v4 (the `bg-opacity-*` utilities were removed), so those
+ * overlays were rendering as opaque black. Use `bg-black/40` slash syntax going forward.
+ */
+@layer components {
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+    background-color: rgb(0 0 0 / 0.4);
+    -webkit-backdrop-filter: blur(4px);
+    backdrop-filter: blur(4px);
+  }
+}

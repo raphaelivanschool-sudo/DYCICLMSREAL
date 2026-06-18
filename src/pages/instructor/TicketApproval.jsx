@@ -353,7 +353,7 @@ function TicketApproval() {
 
       {/* Ticket Details Modal */}
       {showDetailsModal && selectedTicket && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div className="modal-overlay">
           <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl mx-4">
             <div className="flex items-center justify-between p-4 border-b border-gray-200">
               <h3 className="text-lg font-semibold text-gray-900">Ticket Details</h3>
@@ -441,7 +441,7 @@ function TicketApproval() {
 
       {/* Reject Modal */}
       {showRejectModal && selectedTicket && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div className="modal-overlay">
           <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4">
             <div className="flex items-center justify-between p-4 border-b border-gray-200">
               <h3 className="text-lg font-semibold text-gray-900">Reject Ticket</h3>

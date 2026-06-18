@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { io } from 'socket.io-client';
-import { Send, Search, MessageCircle, Megaphone, X, Phone, Video, MoreVertical, Plus, Smile, Paperclip } from 'lucide-react';
+import { Send, Search, MessageCircle, Megaphone, X, Plus, Smile, Paperclip } from 'lucide-react';
 import messagingService from '../../services/messagingService';
 
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:3001';
@@ -376,17 +376,6 @@ function Messaging() {
                     </p>
                   </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <button className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
-                    <Phone className="w-4 h-4 text-gray-500" />
-                  </button>
-                  <button className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
-                    <Video className="w-4 h-4 text-gray-500" />
-                  </button>
-                  <button className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
-                    <MoreVertical className="w-4 h-4 text-gray-500" />
-                  </button>
-                </div>
               </div>
 
               {/* Messages */}
@@ -471,7 +460,7 @@ function Messaging() {
 
       {/* Broadcast Modal */}
       {showBroadcastModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div className="modal-overlay">
           <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4">
             <div className="flex items-center justify-between p-4 border-b border-gray-200">
               <h3 className="text-lg font-semibold text-gray-900">Broadcast Message</h3>

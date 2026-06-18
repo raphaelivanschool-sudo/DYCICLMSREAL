@@ -51,14 +51,14 @@ export default function SubjectManager() {
     }
   }
 
-  const inputClass = `w-full bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700
-    rounded-xl px-4 py-2.5 text-sm text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400
+  const inputClass = `w-full bg-gray-50 border border-gray-200
+    rounded-xl px-4 py-2.5 text-sm text-gray-900 placeholder:text-gray-400
     focus:ring-2 focus:ring-blue-500 focus:border-transparent focus:outline-none transition-all`;
 
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
-        <div className="inline-flex items-center gap-2 bg-zinc-100 dark:bg-zinc-800 px-3 py-1.5 rounded-xl text-sm text-zinc-600 dark:text-zinc-300">
+        <div className="inline-flex items-center gap-2 bg-gray-100 px-3 py-1.5 rounded-xl text-sm text-gray-600">
           <BookOpen size={15} />
           {subjects.length} subject{subjects.length !== 1 ? 's' : ''}
         </div>
@@ -70,29 +70,29 @@ export default function SubjectManager() {
       {listError && <div className="mb-4"><ErrorBox>{listError}</ErrorBox></div>}
 
       {fetching ? (
-        <div className="flex flex-col gap-4">{[1, 2, 3].map((i) => <div key={i} className="animate-pulse bg-zinc-100 dark:bg-zinc-800 rounded-2xl h-20" />)}</div>
+        <div className="flex flex-col gap-4">{[1, 2, 3].map((i) => <div key={i} className="animate-pulse bg-gray-100 rounded-2xl h-20" />)}</div>
       ) : subjects.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-20 text-center">
-          <BookOpen size={40} className="text-zinc-300 dark:text-zinc-600 mb-4" />
-          <p className="text-base font-medium text-zinc-500">No subjects yet</p>
-          <p className="text-sm text-zinc-400 mt-1">Add your first subject to start managing grades.</p>
+          <BookOpen size={40} className="text-gray-300 mb-4" />
+          <p className="text-base font-medium text-gray-500">No subjects yet</p>
+          <p className="text-sm text-gray-400 mt-1">Add your first subject to start managing grades.</p>
         </div>
       ) : (
         <div className="flex flex-col gap-4">
           {subjects.map((s) => (
-            <div key={s.id} className="flex items-center justify-between bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-5">
+            <div key={s.id} className="flex items-center justify-between bg-white border border-gray-200 rounded-2xl p-5">
               <div>
                 <div className="flex items-center gap-2">
-                  <span className="text-base font-semibold text-zinc-900 dark:text-zinc-100">{s.title}</span>
-                  <span className="font-mono text-xs bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 px-2 py-0.5 rounded-lg">{s.code}</span>
+                  <span className="text-base font-semibold text-gray-900">{s.title}</span>
+                  <span className="font-mono text-xs bg-blue-50 text-blue-700 px-2 py-0.5 rounded-lg">{s.code}</span>
                 </div>
-                <div className="flex items-center gap-2 mt-1.5 text-xs text-zinc-500">
+                <div className="flex items-center gap-2 mt-1.5 text-xs text-gray-500">
                   <Layers size={13} /><span>{s.units} unit{s.units !== 1 ? 's' : ''}</span>
                   <span>·</span>
                   <span>{s._count?.sections || 0} section{(s._count?.sections || 0) !== 1 ? 's' : ''}</span>
                 </div>
               </div>
-              <button onClick={() => remove(s.id)} className="flex items-center gap-1.5 text-sm text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 px-3 py-1.5 rounded-xl transition-colors border border-transparent hover:border-red-200 dark:hover:border-red-800">
+              <button onClick={() => remove(s.id)} className="flex items-center gap-1.5 text-sm text-red-500 hover:text-red-600 hover:bg-red-50 px-3 py-1.5 rounded-xl transition-colors border border-transparent hover:border-red-200">
                 <Trash2 size={15} /> Remove
               </button>
             </div>
@@ -108,7 +108,7 @@ export default function SubjectManager() {
             <Field label="Subject title"><input required placeholder="e.g. Introduction to Programming" className={inputClass} value={form.title} onChange={(e) => setForm((p) => ({ ...p, title: e.target.value }))} /></Field>
             <Field label="Units"><input required type="number" min="0" step="0.5" className={inputClass} value={form.units} onChange={(e) => setForm((p) => ({ ...p, units: e.target.value }))} /></Field>
             <div className="flex gap-3 justify-end mt-2">
-              <button type="button" onClick={() => setOpen(false)} className="px-4 py-2 rounded-xl text-sm font-medium border border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-800 transition-colors">Cancel</button>
+              <button type="button" onClick={() => setOpen(false)} className="px-4 py-2 rounded-xl text-sm font-medium border border-gray-200 text-gray-700 hover:bg-gray-50 transition-colors">Cancel</button>
               <button type="submit" disabled={saving} className="flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50 transition-colors">
                 {saving && <Loader2 size={14} className="animate-spin" />} Create subject
               </button>

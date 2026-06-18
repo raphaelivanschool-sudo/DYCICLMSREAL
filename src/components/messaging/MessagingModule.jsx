@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { io } from 'socket.io-client';
-import { X, Search, Send, MessageCircle, MoreVertical, Phone, Video, Users, Plus, Smile, Paperclip } from 'lucide-react';
+import { X, Search, Send, MessageCircle, Users, Plus, Smile, Paperclip } from 'lucide-react';
 import messagingService from '../../services/messagingService';
 
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:3001';
@@ -276,7 +276,7 @@ const MessagingModule = ({ isOpen, onClose, userRole }) => {
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+    <div className="modal-overlay">
       <div className="bg-white rounded-xl w-full max-w-6xl h-[90vh] flex flex-col shadow-2xl">
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-gray-200">
@@ -451,17 +451,6 @@ const MessagingModule = ({ isOpen, onClose, userRole }) => {
                             : 'Offline'}
                       </p>
                     </div>
-                  </div>
-                  <div className="flex items-center space-x-2">
-                    <button className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
-                      <Phone className="w-4 h-4 text-gray-500" />
-                    </button>
-                    <button className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
-                      <Video className="w-4 h-4 text-gray-500" />
-                    </button>
-                    <button className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
-                      <MoreVertical className="w-4 h-4 text-gray-500" />
-                    </button>
                   </div>
                 </div>
 

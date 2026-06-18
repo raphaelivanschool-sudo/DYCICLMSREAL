@@ -14,6 +14,7 @@ import {
   clientIp,
   summarizePayload,
 } from '../utils/activityLog.js';
+import { recordControlAction, resolveTarget } from '../utils/controlLog.js';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -101,6 +102,16 @@ router.post('/wake', authenticateToken, async (req, res) => {
         action: 'WAKE_ON_LAN',
         description: `Wake-on-LAN magic packet sent for MAC ${mac}`,
         ipAddress: clientIp(req),
+      });
+      const wakeTarget = await prisma.agent.findUnique({ where: { mac } }).catch(() => null);
+      await recordControlAction(prisma, {
+        actorId: req.user.id,
+        actorRole: req.user.role,
+        action: 'wake',
+        targetHostname: wakeTarget?.hostname || null,
+        targetIp: wakeTarget?.ipAddress || null,
+        result: 'SENT',
+        detail: `Wake-on-LAN magic packet for MAC ${mac}`,
       });
       res.json({ ok: true, message: `Wake packet sent to ${mac}` });
     });
@@ -325,6 +336,18 @@ router.post('/command', authenticateToken, async (req, res) => {
       action: 'AGENT_REMOTE_COMMAND',
       description: `Remote agent command "${action}" → computer ${targetId} (ip=${ip || '—'} mac=${mac || '—'}) params=${summarizePayload(params)}`,
       ipAddress: clientIp(req),
+    });
+
+    // Structured control-action row for the usage reports.
+    const tgt = resolveTarget(connectedComputers, targetId);
+    await recordControlAction(prisma, {
+      actorId: req.user.id,
+      actorRole: req.user.role,
+      action,
+      ...tgt,
+      targetIp: tgt.targetIp || ip || null,
+      result: 'SENT',
+      detail: `params=${summarizePayload(params)} (strategy=${strategy})`,
     });
 
     res.json({
@@ -627,6 +650,15 @@ router.post('/projection/start', authenticateToken, async (req, res) => {
       }) — session ${result.sessionId}`,
       ipAddress: clientIp(req),
     });
+    await recordControlAction(prisma, {
+      actorId: req.user.id,
+      actorRole: req.user.role,
+      action: 'project',
+      result: 'SENT',
+      detail: `Projection start — ${
+        targets === 'all' ? 'all online' : `${(result.perGuest || []).length} selected`
+      }, session ${result.sessionId}`,
+    });
     return res.json({ success: true, ...result });
   } catch (error) {
     console.error('[agents/projection/start]', error);
@@ -646,6 +678,13 @@ router.post('/projection/stop', authenticateToken, async (req, res) => {
         action: 'SCREEN_PROJECTION_STOP',
         description: `Stopped Locked Demo Mode via REST — session ${result.sessionId}`,
         ipAddress: clientIp(req),
+      });
+      await recordControlAction(prisma, {
+        actorId: req.user.id,
+        actorRole: req.user.role,
+        action: 'projection-stop',
+        result: 'SENT',
+        detail: `Projection stop — session ${result.sessionId}`,
       });
     }
     return res.json({ success: true, ...result });

@@ -15,26 +15,26 @@ export function fmtPct(p) {
 
 /** Tailwind text color for a grade point (lower = better; 3.00 floor passing). */
 export function gradeColor(gp, isInc) {
-  if (isInc) return 'text-zinc-500 dark:text-zinc-400';
-  if (gp == null) return 'text-zinc-400';
-  if (gp <= 2.0) return 'text-emerald-600 dark:text-emerald-400';
-  if (gp <= 3.0) return 'text-blue-600 dark:text-blue-400';
-  return 'text-red-600 dark:text-red-400';
+  if (isInc) return 'text-gray-500';
+  if (gp == null) return 'text-gray-400';
+  if (gp <= 2.0) return 'text-emerald-600';
+  if (gp <= 3.0) return 'text-blue-600';
+  return 'text-red-600';
 }
 
 /** Badge styles keyed by remark string. */
 export const REMARK_STYLE = {
-  PASSED: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400',
-  FAILED: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',
-  INC: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400',
-  'IN PROGRESS': 'bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400',
+  PASSED: 'bg-emerald-100 text-emerald-700',
+  FAILED: 'bg-red-100 text-red-700',
+  INC: 'bg-amber-100 text-amber-700',
+  'IN PROGRESS': 'bg-gray-100 text-gray-500',
 };
 
 /** Badge styles keyed by enrollment grade status. */
 export const STATUS_STYLE = {
-  IN_PROGRESS: 'bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300',
-  SUBMITTED: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
-  LOCKED: 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400',
+  IN_PROGRESS: 'bg-gray-100 text-gray-600',
+  SUBMITTED: 'bg-blue-100 text-blue-700',
+  LOCKED: 'bg-purple-100 text-purple-700',
 };
 
 export const STATUS_LABEL = {

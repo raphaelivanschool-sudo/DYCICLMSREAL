@@ -6,10 +6,10 @@ import {
   Network,
   Shield,
   FileText,
+  FileSpreadsheet,
   Ticket,
   Package,
   Building2,
-  Bell,
   LogOut,
   User,
   Users,
@@ -34,6 +34,7 @@ const navigation = [
   { name: "Network Control", href: "/admin/network", icon: Network },
   { name: "Security Settings", href: "/admin/security", icon: Shield },
   { name: "System Logs & Reports", href: "/admin/logs", icon: FileText },
+  { name: "Usage Reports", href: "/admin/reports", icon: FileSpreadsheet },
   { name: "Tickets / Support", href: "/admin/tickets", icon: Ticket },
   { name: "Inventory", href: "/admin/hardware-inventory", icon: Package },
   { name: "Grading", href: "/admin/grading", icon: GraduationCap },
@@ -129,11 +130,6 @@ function AdminLayout() {
 
           {/* Right Side Actions */}
           <div className="flex items-center space-x-4">
-            <button className="relative p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors">
-              <Bell className="w-5 h-5" />
-              <span className="absolute top-1 right-1 w-2 h-2 bg-red-500 rounded-full"></span>
-            </button>
-            <div className="w-px h-6 bg-gray-300"></div>
             <div className="flex items-center">
               <div className="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center mr-2">
                 <span className="text-white text-xs font-semibold">AD</span>

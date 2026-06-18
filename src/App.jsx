@@ -15,6 +15,7 @@ import Computers from "./pages/admin/Computers";
 import NetworkControl from "./pages/admin/NetworkControl";
 import SecuritySettings from "./pages/admin/SecuritySettings";
 import SystemLogs from "./pages/admin/SystemLogs";
+import Reports from "./pages/admin/Reports";
 import Tickets from "./pages/admin/Tickets";
 import HardwareInventory from "./pages/admin/HardwareInventory";
 import DeveloperModePage from "./pages/admin/DeveloperModePage";
@@ -26,6 +27,7 @@ import StudentScreenMonitoring from "./pages/instructor/StudentScreenMonitoring"
 import ControlActions from "./pages/instructor/ControlActions";
 import Messaging from "./pages/instructor/Messaging";
 import TicketApproval from "./pages/instructor/TicketApproval";
+import InstructorReports from "./pages/instructor/Reports";
 
 // Student imports
 import StudentLayout from "./components/layout/StudentLayout";
@@ -65,6 +67,7 @@ function App() {
           <Route path="network" element={<NetworkControl />} />
           <Route path="security" element={<SecuritySettings />} />
           <Route path="logs" element={<SystemLogs />} />
+          <Route path="reports" element={<Reports />} />
           <Route path="tickets" element={<Tickets />} />
           <Route path="hardware-inventory" element={<HardwareInventory />} />
           <Route path="developer" element={<DeveloperModePage />} />
@@ -87,6 +90,7 @@ function App() {
           <Route path="controls" element={<ControlActions />} />
           <Route path="messaging" element={<Messaging />} />
           <Route path="ticket-approval" element={<TicketApproval />} />
+          <Route path="reports" element={<InstructorReports />} />
           <Route path="grading" element={<GradingPanel />} />
         </Route>
 

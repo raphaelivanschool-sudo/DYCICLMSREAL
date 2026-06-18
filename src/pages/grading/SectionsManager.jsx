@@ -69,7 +69,7 @@ export default function SectionsManager() {
     await loadSections();
   }
 
-  const selectClass = 'w-full bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none';
+  const selectClass = 'w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none';
   const inputClass = selectClass;
 
   if (selected) {
@@ -80,7 +80,7 @@ export default function SectionsManager() {
     <div>
       <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
         <div className="flex items-center gap-3">
-          <div className="inline-flex items-center gap-2 bg-zinc-100 dark:bg-zinc-800 px-3 py-1.5 rounded-xl text-sm text-zinc-600 dark:text-zinc-300">
+          <div className="inline-flex items-center gap-2 bg-gray-100 px-3 py-1.5 rounded-xl text-sm text-gray-600">
             <Layers size={15} /> {sections.length} section{sections.length !== 1 ? 's' : ''}
           </div>
           <select className={selectClass + ' !w-auto'} value={filterSem} onChange={(e) => setFilterSem(e.target.value)}>
@@ -94,32 +94,32 @@ export default function SectionsManager() {
       </div>
 
       {loading ? (
-        <div className="flex flex-col gap-4">{[1, 2, 3].map((i) => <div key={i} className="animate-pulse bg-zinc-100 dark:bg-zinc-800 rounded-2xl h-20" />)}</div>
+        <div className="flex flex-col gap-4">{[1, 2, 3].map((i) => <div key={i} className="animate-pulse bg-gray-100 rounded-2xl h-20" />)}</div>
       ) : sections.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-20 text-center">
-          <Layers size={40} className="text-zinc-300 dark:text-zinc-600 mb-4" />
-          <p className="text-base font-medium text-zinc-500">No sections yet</p>
-          <p className="text-sm text-zinc-400 mt-1">Create a section to assign a subject to an instructor for a semester.</p>
+          <Layers size={40} className="text-gray-300 mb-4" />
+          <p className="text-base font-medium text-gray-500">No sections yet</p>
+          <p className="text-sm text-gray-400 mt-1">Create a section to assign a subject to an instructor for a semester.</p>
         </div>
       ) : (
         <div className="flex flex-col gap-4">
           {sections.map((s) => (
-            <div key={s.id} className="flex items-center justify-between bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-5">
+            <div key={s.id} className="flex items-center justify-between bg-white border border-gray-200 rounded-2xl p-5">
               <button onClick={() => setSelected(s)} className="flex-1 text-left">
                 <div className="flex items-center gap-2">
-                  <span className="text-base font-semibold text-zinc-900 dark:text-zinc-100">{s.subject.title}</span>
-                  <span className="font-mono text-xs bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 px-2 py-0.5 rounded-lg">{s.subject.code}</span>
-                  <span className="text-xs text-zinc-500">· {s.name}</span>
+                  <span className="text-base font-semibold text-gray-900">{s.subject.title}</span>
+                  <span className="font-mono text-xs bg-blue-50 text-blue-700 px-2 py-0.5 rounded-lg">{s.subject.code}</span>
+                  <span className="text-xs text-gray-500">· {s.name}</span>
                 </div>
-                <div className="flex items-center gap-2 mt-1.5 text-xs text-zinc-500">
+                <div className="flex items-center gap-2 mt-1.5 text-xs text-gray-500">
                   <CalendarRange size={13} /><span>{s.semester.name}</span><span>·</span>
                   <span>{s.instructor.fullName}</span><span>·</span>
                   <Users size={13} /><span>{s._count?.enrollments || 0} enrolled</span>
                 </div>
               </button>
               <div className="flex items-center gap-3">
-                <button onClick={() => remove(s.id)} className="text-zinc-400 hover:text-red-500 transition-colors"><Trash2 size={16} /></button>
-                <ChevronRight size={18} className="text-zinc-300 cursor-pointer" onClick={() => setSelected(s)} />
+                <button onClick={() => remove(s.id)} className="text-gray-400 hover:text-red-500 transition-colors"><Trash2 size={16} /></button>
+                <ChevronRight size={18} className="text-gray-300 cursor-pointer" onClick={() => setSelected(s)} />
               </div>
             </div>
           ))}
@@ -150,7 +150,7 @@ export default function SectionsManager() {
             </Field>
             <Field label="Section name"><input required placeholder="e.g. BSIT 3A" className={inputClass} value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} /></Field>
             <div className="flex gap-3 justify-end mt-2">
-              <button type="button" onClick={() => setOpen(false)} className="px-4 py-2 rounded-xl text-sm font-medium border border-zinc-200 dark:border-zinc-700">Cancel</button>
+              <button type="button" onClick={() => setOpen(false)} className="px-4 py-2 rounded-xl text-sm font-medium border border-gray-200">Cancel</button>
               <button type="submit" disabled={saving} className="flex items-center gap-2 px-5 py-2 rounded-xl text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50">{saving && <Loader2 size={14} className="animate-spin" />} Create</button>
             </div>
           </form>
@@ -217,56 +217,56 @@ function SectionDetail({ section, onBack }) {
     await refreshEnrolled();
   }
 
-  const inputClass = 'w-full bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-xl pl-9 pr-3 py-2.5 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none';
+  const inputClass = 'w-full bg-gray-50 border border-gray-200 rounded-xl pl-9 pr-3 py-2.5 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none';
 
   return (
     <div className="flex flex-col gap-5">
-      <button onClick={onBack} className="inline-flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 w-fit">
+      <button onClick={onBack} className="inline-flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-700 w-fit">
         <ArrowLeft size={15} /> Back to sections
       </button>
 
-      <div className="flex items-center justify-between bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-5">
+      <div className="flex items-center justify-between bg-white border border-gray-200 rounded-2xl p-5">
         <div>
           <div className="flex items-center gap-2">
-            <span className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">{section.subject.title}</span>
-            <span className="font-mono text-xs bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 px-2 py-0.5 rounded-lg">{section.subject.code}</span>
+            <span className="text-lg font-semibold text-gray-900">{section.subject.title}</span>
+            <span className="font-mono text-xs bg-blue-50 text-blue-700 px-2 py-0.5 rounded-lg">{section.subject.code}</span>
             <span className={`px-2.5 py-1 rounded-full text-xs font-semibold ${STATUS_STYLE[status]}`}>{STATUS_LABEL[status]}</span>
           </div>
-          <p className="text-xs text-zinc-500 mt-1.5">{section.name} · {section.semester.name} · {section.instructor.fullName}</p>
+          <p className="text-xs text-gray-500 mt-1.5">{section.name} · {section.semester.name} · {section.instructor.fullName}</p>
         </div>
         {status === 'LOCKED' ? (
-          <button onClick={() => setUnlockOpen(true)} className="inline-flex items-center gap-1.5 text-sm text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-900/20 px-3 py-1.5 rounded-xl border border-amber-200 dark:border-amber-800"><Unlock size={15} /> Unlock</button>
+          <button onClick={() => setUnlockOpen(true)} className="inline-flex items-center gap-1.5 text-sm text-amber-600 hover:bg-amber-50 px-3 py-1.5 rounded-xl border border-amber-200"><Unlock size={15} /> Unlock</button>
         ) : (
-          <button onClick={lock} className="inline-flex items-center gap-1.5 text-sm text-purple-600 hover:bg-purple-50 dark:hover:bg-purple-900/20 px-3 py-1.5 rounded-xl border border-purple-200 dark:border-purple-800"><Lock size={15} /> Lock grades</button>
+          <button onClick={lock} className="inline-flex items-center gap-1.5 text-sm text-purple-600 hover:bg-purple-50 px-3 py-1.5 rounded-xl border border-purple-200"><Lock size={15} /> Lock grades</button>
         )}
       </div>
 
       {/* Enrollment */}
-      <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-5">
-        <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-200 mb-4 flex items-center gap-2"><UserPlus size={16} /> Enrollment ({enrolled.length})</h3>
+      <div className="bg-white border border-gray-200 rounded-2xl p-5">
+        <h3 className="text-sm font-semibold text-gray-700 mb-4 flex items-center gap-2"><UserPlus size={16} /> Enrollment ({enrolled.length})</h3>
         <div className="relative mb-3">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
           <input className={inputClass} placeholder="Search students by name or email to enroll..." value={query} onChange={(e) => setQuery(e.target.value)} />
-          {searching && <Loader2 size={15} className="animate-spin absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400" />}
+          {searching && <Loader2 size={15} className="animate-spin absolute right-3 top-1/2 -translate-y-1/2 text-gray-400" />}
         </div>
         {results.length > 0 && (
-          <div className="flex flex-col gap-1 mb-3 border border-zinc-200 dark:border-zinc-800 rounded-xl p-2">
+          <div className="flex flex-col gap-1 mb-3 border border-gray-200 rounded-xl p-2">
             {results.map((s) => (
-              <div key={s.id} className="flex items-center justify-between px-2 py-1.5 hover:bg-zinc-50 dark:hover:bg-zinc-800 rounded-lg">
-                <div><p className="text-sm text-zinc-800 dark:text-zinc-100">{s.fullName}</p><p className="text-xs text-zinc-400">{s.email || s.username}</p></div>
+              <div key={s.id} className="flex items-center justify-between px-2 py-1.5 hover:bg-gray-50 rounded-lg">
+                <div><p className="text-sm text-gray-800">{s.fullName}</p><p className="text-xs text-gray-400">{s.email || s.username}</p></div>
                 <button onClick={() => enroll(s.id)} className="text-xs inline-flex items-center gap-1 text-blue-600 hover:underline"><Plus size={13} /> Enroll</button>
               </div>
             ))}
           </div>
         )}
         {enrolled.length === 0 ? (
-          <p className="text-sm text-zinc-400">No students enrolled yet.</p>
+          <p className="text-sm text-gray-400">No students enrolled yet.</p>
         ) : (
           <div className="flex flex-wrap gap-2">
             {enrolled.map((e) => (
-              <span key={e.enrollmentId} className="inline-flex items-center gap-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-xl px-3 py-1.5">
+              <span key={e.enrollmentId} className="inline-flex items-center gap-2 text-sm bg-gray-50 border border-gray-200 rounded-xl px-3 py-1.5">
                 {e.student.fullName}
-                {status === 'IN_PROGRESS' && <button onClick={() => unenroll(e.studentId)} className="text-zinc-400 hover:text-red-500"><X size={13} /></button>}
+                {status === 'IN_PROGRESS' && <button onClick={() => unenroll(e.studentId)} className="text-gray-400 hover:text-red-500"><X size={13} /></button>}
               </span>
             ))}
           </div>
@@ -275,16 +275,16 @@ function SectionDetail({ section, onBack }) {
 
       {/* Read-only gradebook */}
       <div>
-        <h3 className="text-sm font-semibold text-zinc-700 dark:text-zinc-200 mb-3">Gradebook (read-only)</h3>
+        <h3 className="text-sm font-semibold text-gray-700 mb-3">Gradebook (read-only)</h3>
         <GradebookView key={gbKey} sectionId={section.id} readOnly />
       </div>
 
       {unlockOpen && (
         <Modal onClose={() => { setUnlockOpen(false); setUnlockReason(''); }} title="Unlock section">
-          <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">Unlocking returns grades to the instructor for editing. A reason is recorded in the audit log.</p>
-          <textarea required rows={3} placeholder="Reason for unlocking..." className="w-full bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" value={unlockReason} onChange={(e) => setUnlockReason(e.target.value)} />
+          <p className="text-sm text-gray-500 mb-4">Unlocking returns grades to the instructor for editing. A reason is recorded in the audit log.</p>
+          <textarea required rows={3} placeholder="Reason for unlocking..." className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" value={unlockReason} onChange={(e) => setUnlockReason(e.target.value)} />
           <div className="flex gap-3 justify-end mt-4">
-            <button onClick={() => { setUnlockOpen(false); setUnlockReason(''); }} className="px-4 py-2 rounded-xl text-sm font-medium border border-zinc-200 dark:border-zinc-700">Cancel</button>
+            <button onClick={() => { setUnlockOpen(false); setUnlockReason(''); }} className="px-4 py-2 rounded-xl text-sm font-medium border border-gray-200">Cancel</button>
             <button onClick={confirmUnlock} disabled={!unlockReason.trim()} className="px-4 py-2 rounded-xl text-sm font-medium bg-amber-600 hover:bg-amber-700 text-white disabled:opacity-50">Unlock</button>
           </div>
         </Modal>

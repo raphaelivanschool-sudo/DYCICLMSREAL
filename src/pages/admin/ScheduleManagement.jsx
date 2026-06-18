@@ -657,7 +657,7 @@ const ScheduleManagement = () => {
 
       {/* Create/Edit Schedule Modal */}
       {(showCreateModal || showEditModal) && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div className="modal-overlay">
           <div className="bg-white rounded-lg p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
             <h2 className="text-xl font-bold mb-4">
               {showEditModal ? 'Edit Schedule' : 'Create New Schedule'}
@@ -861,7 +861,7 @@ const ScheduleManagement = () => {
 
       {/* Delete Confirmation Modal */}
       {showDeleteModal && selectedSchedule && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div className="modal-overlay">
           <div className="bg-white rounded-lg p-6 w-full max-w-sm">
             <div className="flex items-center mb-4">
               <AlertCircle className="w-6 h-6 text-red-600 mr-2" />

@@ -2,7 +2,7 @@ import { X, Monitor } from 'lucide-react';
 
 const DeveloperMode = ({ onClose }) => {
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+    <div className="modal-overlay">
       <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg mx-4 overflow-hidden">
         {/* Header */}
         <div className="bg-gray-900 text-white p-6 flex items-center justify-between">

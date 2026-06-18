@@ -9,11 +9,9 @@ import GradingReports from './GradingReports';
 import AuditLogViewer from './AuditLogViewer';
 import InstructorGradebook from './InstructorGradebook';
 
-const tabClass = `px-5 py-2 rounded-xl text-sm font-medium transition-all
-  text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300
-  data-[state=active]:bg-white data-[state=active]:dark:bg-zinc-700
-  data-[state=active]:text-zinc-900 data-[state=active]:dark:text-zinc-100
-  data-[state=active]:shadow-sm`;
+// Layout/shape only — active/inactive colors come from the shared Tabs component
+// (light theme: white active chip on a gray-100 bar), so they stay native to the app.
+const tabClass = 'px-5 py-2 rounded-lg text-sm font-medium';
 
 export default function GradingPanel() {
   const user = getUser();
@@ -24,9 +22,9 @@ export default function GradingPanel() {
       <div className="mb-8">
         <div className="flex items-center gap-3 mb-1">
           <GraduationCap size={22} className="text-blue-600" />
-          <h1 className="text-2xl font-semibold text-zinc-900 dark:text-zinc-100">Grading</h1>
+          <h1 className="text-2xl font-semibold text-gray-900">Grading</h1>
         </div>
-        <p className="text-sm text-zinc-500 dark:text-zinc-400 ml-9">
+        <p className="text-sm text-gray-500 ml-9">
           {isAdmin
             ? 'Set up semesters, subjects, sections and the grading scale; oversee and lock grades'
             : 'Manage your sections, enter scores and submit final grades'}
@@ -35,7 +33,7 @@ export default function GradingPanel() {
 
       {isAdmin ? (
         <Tabs defaultValue="sections">
-          <TabsList className="inline-flex flex-wrap gap-1 bg-zinc-100 dark:bg-zinc-800 p-1 rounded-2xl mb-8">
+          <TabsList className="flex flex-wrap gap-1 h-auto rounded-xl mb-8">
             <TabsTrigger value="sections" className={tabClass}>Sections</TabsTrigger>
             <TabsTrigger value="subjects" className={tabClass}>Subjects</TabsTrigger>
             <TabsTrigger value="semesters" className={tabClass}>Semesters</TabsTrigger>

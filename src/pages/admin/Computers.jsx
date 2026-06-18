@@ -660,7 +660,7 @@ function Computers() {
 
       {/* Edit Specs Modal */}
       {editSpecsModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div className="modal-overlay">
           <div className="bg-white rounded-lg shadow-xl w-full max-w-lg mx-4">
             <div className="p-6 border-b border-gray-200">
               <div className="flex items-center justify-between">
@@ -794,7 +794,7 @@ function Computers() {
 
       {/* Software Modal */}
       {softwareModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div className="modal-overlay">
           <div className="bg-white rounded-lg shadow-xl w-full max-w-lg mx-4 max-h-[80vh] overflow-hidden">
             <div className="p-6 border-b border-gray-200">
               <div className="flex items-center justify-between">
@@ -886,7 +886,7 @@ function Computers() {
 
       {/* Bulk Edit Modal */}
       {bulkEditModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div className="modal-overlay">
           <div className="bg-white rounded-lg shadow-xl w-full max-w-lg mx-4">
             <div className="p-6 border-b border-gray-200">
               <div className="flex items-center justify-between">
@@ -1007,7 +1007,7 @@ function Computers() {
 
       {/* Clone Specs Modal */}
       {cloneModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div className="modal-overlay">
           <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl mx-4 max-h-[80vh] overflow-hidden">
             <div className="p-6 border-b border-gray-200">
               <div className="flex items-center justify-between">
