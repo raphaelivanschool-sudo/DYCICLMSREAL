@@ -175,7 +175,9 @@ function HardwareInventory() {
       ]);
 
       setInventoryItems(itemsRes.data.data || []);
-      setStats(statsRes.data);
+      // API wraps the payload as { success, data }; unwrap the inner object so
+      // the summary cards read stats.total / good / needAttention / underRepairOrMissing.
+      setStats(statsRes.data.data || null);
     } catch (err) {
       console.error("Error fetching inventory data:", err);
       setError("Failed to load inventory data");

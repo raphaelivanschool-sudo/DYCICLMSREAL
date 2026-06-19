@@ -9,7 +9,6 @@ import {
   RefreshCw,
   AlertCircle,
   ArrowRight,
-  Loader2,
   Lock,
   Clock,
   CheckCircle,
@@ -153,7 +152,6 @@ function Dashboard() {
           <SkeletonCard />
           <SkeletonCard />
           <SkeletonCard />
-          <SkeletonCard />
         </>
       );
     }
@@ -176,20 +174,12 @@ function Dashboard() {
         onClick: () => navigate('/admin/computers')
       },
       {
-        name: 'Active Sessions',
-        value: stats.sessions.active,
-        subText: `${stats.sessions.totalToday} sessions today`,
-        icon: Activity,
-        color: 'purple',
-        onClick: () => {}
-      },
-      {
         name: 'Open Tickets',
         value: stats.tickets.open,
         subText: `${stats.tickets.inProgress} in progress`,
         icon: Ticket,
         color: 'orange',
-        onClick: () => {}
+        onClick: () => navigate('/admin/tickets')
       },
       {
         name: 'Total Users',
@@ -557,7 +547,7 @@ function Dashboard() {
       </div>
 
       {/* Stats Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         {renderStatsCards()}
       </div>
 

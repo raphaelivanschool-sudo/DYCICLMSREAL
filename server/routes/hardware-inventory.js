@@ -108,12 +108,14 @@ router.get(
       stats.forEach((stat) => {
         const count = stat._count.id;
 
+        // Condition lens: GOOD vs. everything else (FAIR/POOR/DAMAGED) needs attention.
         if (stat.condition === "GOOD") {
           result.good += count;
-        } else if (stat.condition === "POOR" || stat.condition === "DAMAGED") {
+        } else {
           result.needAttention += count;
         }
 
+        // Status lens (independent of condition).
         if (stat.status === "UNDER_REPAIR" || stat.status === "MISSING") {
           result.underRepairOrMissing += count;
         }

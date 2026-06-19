@@ -40,17 +40,26 @@ router.get('/stats', async (req, res) => {
     const offlineComputers = computersStats.find(s => s.status === 'OFFLINE')?._count.id || 0;
     const inUseComputers = computersStats.find(s => s.status === 'IN_USE')?._count.id || 0;
 
-    // Get sessions stats - simplified since we don't have a Session model yet
-    // Using placeholder values - will be updated when Session model is properly defined
-    const activeSessions = 0;
-    const totalSessionsToday = 0;
+    // Get tickets stats
+    const ticketsStats = await prisma.ticket.groupBy({
+      by: ['status'],
+      _count: {
+        id: true
+      }
+    });
 
-    // Get tickets stats - simplified since we don't have Ticket model yet
-    // Using placeholder values - will be updated when Ticket model is defined
-    const openTickets = 0;
-    const inProgressTickets = 0;
-    const resolvedTickets = 0;
-    const totalTickets = 0;
+    const ticketCountByStatus = (status) =>
+      ticketsStats.find(s => s.status === status)?._count.id || 0;
+
+    const totalTickets = ticketsStats.reduce((sum, stat) => sum + stat._count.id, 0);
+    const inProgressTickets = ticketCountByStatus('IN_PROGRESS');
+    const resolvedTickets = ticketCountByStatus('RESOLVED') + ticketCountByStatus('CLOSED');
+    // "Open" = tickets still needing attention (not resolved/closed/rejected)
+    const openTickets =
+      ticketCountByStatus('PENDING_APPROVAL') +
+      ticketCountByStatus('APPROVED') +
+      ticketCountByStatus('OPEN') +
+      ticketCountByStatus('IN_PROGRESS');
 
     // Get users stats
     const usersStats = await prisma.user.groupBy({
@@ -64,25 +73,6 @@ router.get('/stats', async (req, res) => {
     const adminUsers = usersStats.find(s => s.role === 'ADMIN')?._count.id || 0;
     const instructorUsers = usersStats.find(s => s.role === 'INSTRUCTOR')?._count.id || 0;
     const studentUsers = usersStats.find(s => s.role === 'STUDENT')?._count.id || 0;
-
-    // Get recent logs - check if ActivityLog table exists, otherwise return empty
-    let recentLogs = [];
-    try {
-      recentLogs = await prisma.activityLog?.findMany({
-        take: 10,
-        orderBy: { timestamp: 'desc' },
-        include: {
-          user: {
-            select: {
-              fullName: true
-            }
-          }
-        }
-      }) || [];
-    } catch (e) {
-      // ActivityLog table might not exist yet
-      recentLogs = [];
-    }
 
     // Get labs overview with computer breakdown
     const labsOverview = await prisma.laboratory.findMany({
@@ -134,10 +124,6 @@ router.get('/stats', async (req, res) => {
         inUse: inUseComputers,
         locked: lockedComputers
       },
-      sessions: {
-        active: activeSessions,
-        totalToday: totalSessionsToday
-      },
       tickets: {
         open: openTickets,
         inProgress: inProgressTickets,
@@ -150,14 +136,6 @@ router.get('/stats', async (req, res) => {
         instructors: instructorUsers,
         students: studentUsers
       },
-      recentLogs: recentLogs.map(log => ({
-        id: log.id,
-        action: log.action,
-        details: log.details,
-        timestamp: log.timestamp,
-        user: log.user,
-        targetComputer: log.targetComputer
-      })),
       labsOverview: formattedLabsOverview
     };
 
@@ -171,37 +149,28 @@ router.get('/stats', async (req, res) => {
 // GET /api/dashboard/recent-activity - Return recent system logs
 router.get('/recent-activity', async (req, res) => {
   try {
-    let recentActivity = [];
-    
-    try {
-      recentActivity = await prisma.activityLog?.findMany({
-        take: 20,
-        orderBy: { timestamp: 'desc' },
-        include: {
-          user: {
-            select: {
-              fullName: true,
-              role: true
-            }
+    const recentActivity = await prisma.systemLog.findMany({
+      take: 20,
+      orderBy: { createdAt: 'desc' },
+      include: {
+        user: {
+          select: {
+            fullName: true,
+            role: true
           }
         }
-      }) || [];
-    } catch (e) {
-      // ActivityLog table might not exist yet
-      recentActivity = [];
-    }
+      }
+    });
 
     const formattedActivity = recentActivity.map(log => ({
       id: log.id,
       action: log.action,
-      details: log.details,
-      timestamp: log.timestamp,
+      details: log.description,
+      timestamp: log.createdAt,
       user: log.user ? {
         fullName: log.user.fullName,
         role: log.user.role
-      } : null,
-      targetComputer: log.targetComputer,
-      targetLab: log.targetLab
+      } : null
     }));
 
     res.json(formattedActivity);
