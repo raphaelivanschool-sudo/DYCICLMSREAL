@@ -1,32 +1,31 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { 
-  User, 
-  Monitor, 
-  MapPin, 
-  Clock, 
-  UserCircle,
-  Megaphone,
+import {
+  User,
+  Clock,
   Ticket,
   CheckCircle,
-  HelpCircle,
-  FileText,
-  ChevronRight,
   MessageCircle
 } from 'lucide-react';
-import sessionContextService from '../../services/sessionContextService';
+
+function formatElapsedTime(startTime) {
+  const diff = new Date() - startTime;
+  const hours = Math.floor(diff / (1000 * 60 * 60));
+  const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+  const seconds = Math.floor((diff % (1000 * 60)) / 1000);
+  return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+}
+
+const formatDate = () => new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 
 function SessionDashboard() {
   const navigate = useNavigate();
   // Get actual user data from localStorage
-  const [currentUser, setCurrentUser] = useState(() => {
+  const [currentUser] = useState(() => {
     const stored = localStorage.getItem('user');
     return stored ? JSON.parse(stored) : null;
   });
 
-  const [ctx, setCtx] = useState(null);
-  const [ctxError, setCtxError] = useState('');
-  
   const [sessionStartTime] = useState(() => {
     // Store session start time when component mounts
     const stored = sessionStorage.getItem('sessionStartTime');
@@ -35,61 +34,28 @@ function SessionDashboard() {
     sessionStorage.setItem('sessionStartTime', now.toISOString());
     return now;
   });
-  
-  const [elapsedTime, setElapsedTime] = useState('00:00:00');
-  const [currentTime, setCurrentTime] = useState(new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }));
-  const [currentDate, setCurrentDate] = useState(new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }));
+
+  const [elapsedTime, setElapsedTime] = useState(() => formatElapsedTime(sessionStartTime));
+  const [currentDate, setCurrentDate] = useState(formatDate);
 
   // Timer - update elapsed time every second
   useEffect(() => {
-    const formatElapsedTime = (startTime) => {
-      const now = new Date();
-      const diff = now - startTime;
-      
-      const hours = Math.floor(diff / (1000 * 60 * 60));
-      const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
-      const seconds = Math.floor((diff % (1000 * 60)) / 1000);
-      
-      return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-    };
-    
     const timer = setInterval(() => {
-      setCurrentTime(new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }));
-      setCurrentDate(new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }));
+      setCurrentDate(formatDate());
       setElapsedTime(formatElapsedTime(sessionStartTime));
     }, 1000); // Update every second
-    
-    // Initial calculation
-    setElapsedTime(formatElapsedTime(sessionStartTime));
-    
+
     return () => clearInterval(timer);
   }, [sessionStartTime]);
 
-  useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      try {
-        setCtxError('');
-        const data = await sessionContextService.getStudentContext();
-        if (!cancelled) setCtx(data);
-      } catch (e) {
-        if (!cancelled) setCtxError(e?.message || 'Failed to load session info');
-      }
-    };
-    load();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const announcements = [];
+  const startTimeLabel = sessionStartTime.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
 
   return (
     <div className="max-w-7xl mx-auto">
       {/* Page Header */}
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-gray-900">Session Dashboard</h1>
-        <p className="text-gray-500">View your current lab session and assigned seat information</p>
+        <p className="text-gray-500">View your current lab session</p>
       </div>
 
       {/* Welcome Banner */}
@@ -100,7 +66,7 @@ function SessionDashboard() {
           </div>
           <div>
             <p className="text-lg font-semibold text-gray-900">Welcome, {currentUser?.fullName || currentUser?.username || 'Student'}!</p>
-            <p className="text-sm text-gray-500">Your session started at {sessionStartTime.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })} on {currentDate}</p>
+            <p className="text-sm text-gray-500">Your session started at {startTimeLabel} on {currentDate}</p>
           </div>
         </div>
         <div className="flex items-center">
@@ -109,77 +75,17 @@ function SessionDashboard() {
         </div>
       </div>
 
-      {/* Info Cards Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        {/* Laboratory Card */}
-        <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
-          <div className="flex items-center justify-between mb-3">
-            <span className="text-sm font-medium text-gray-500">Laboratory</span>
-            <Monitor className="w-5 h-5 text-blue-500" />
-          </div>
-          <p className="font-semibold text-gray-900">{ctx?.laboratory?.name || 'No active session'}</p>
-          <p className="text-xs text-gray-400">Current location</p>
-        </div>
-
-        {/* Assigned Seat Card */}
-        <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
-          <div className="flex items-center justify-between mb-3">
-            <span className="text-sm font-medium text-gray-500">Assigned Seat</span>
-            <MapPin className="w-5 h-5 text-green-500" />
-          </div>
-          <p className="font-semibold text-gray-900">
-            {ctx?.assignment?.computer?.seatNumber != null ? `Seat ${ctx.assignment.computer.seatNumber}` : 'Seat —'}
-          </p>
-          <p className="text-xs text-gray-400">{ctx?.assignment?.computer?.name || '—'}</p>
-        </div>
-
-        {/* Session Duration Card */}
-        <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
-          <div className="flex items-center justify-between mb-3">
-            <span className="text-sm font-medium text-gray-500">Session Duration</span>
-            <Clock className="w-5 h-5 text-purple-500" />
-          </div>
-          <p className="font-semibold text-gray-900">{elapsedTime}</p>
-          <p className="text-xs text-gray-400">Elapsed time</p>
-        </div>
-
-        {/* Instructor Card */}
-        <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
-          <div className="flex items-center justify-between mb-3">
-            <span className="text-sm font-medium text-gray-500">Instructor</span>
-            <UserCircle className="w-5 h-5 text-orange-500" />
-          </div>
-          <p className="font-semibold text-gray-900">{ctx?.instructor?.fullName || '—'}</p>
-          <p className="text-xs text-gray-400">Course facilitator</p>
-        </div>
-      </div>
-
-      {!!ctxError && (
-        <div className="mb-6 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl p-4 text-sm">
-          {ctxError}
-        </div>
-      )}
-
       {/* Quick Actions */}
       <div className="mb-6">
         <h2 className="text-lg font-semibold text-gray-900 mb-4">Quick Actions</h2>
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-          {/* Announcements */}
-          <div onClick={() => navigate('/student/messaging')} className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm text-center cursor-pointer hover:shadow-md transition-shadow">
-            <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-3">
-              <Megaphone className="w-6 h-6 text-blue-600" />
-            </div>
-            <p className="font-medium text-gray-900">Announcements</p>
-            <p className="text-xs text-gray-400">View messages</p>
-          </div>
-
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-w-2xl">
           {/* Chats */}
-          <div onClick={() => navigate('/student/messaging')} className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm text-center cursor-pointer hover:shadow-md transition-shadow relative">
+          <div onClick={() => navigate('/student/messaging')} className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm text-center cursor-pointer hover:shadow-md transition-shadow">
             <div className="w-12 h-12 bg-purple-100 rounded-full flex items-center justify-center mx-auto mb-3">
               <MessageCircle className="w-6 h-6 text-purple-600" />
             </div>
             <p className="font-medium text-gray-900">Chats</p>
-            <p className="text-xs text-gray-400">Open messages</p>
+            <p className="text-xs text-gray-400">Message your instructor</p>
           </div>
 
           {/* Submit Ticket */}
@@ -190,47 +96,23 @@ function SessionDashboard() {
             <p className="font-medium text-gray-900">Submit Ticket</p>
             <p className="text-xs text-gray-400">Report issues</p>
           </div>
-
-          {/* Help Request */}
-          <div onClick={() => navigate('/student/tickets')} className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm text-center cursor-pointer hover:shadow-md transition-shadow">
-            <div className="w-12 h-12 bg-purple-100 rounded-full flex items-center justify-center mx-auto mb-3">
-              <HelpCircle className="w-6 h-6 text-purple-600" />
-            </div>
-            <p className="font-medium text-gray-900">Help Request</p>
-            <p className="text-xs text-gray-400">Ask instructor</p>
-          </div>
         </div>
       </div>
 
-      {/* Two Column Layout */}
+      {/* Session Info */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Recent Activity */}
-        <div className="lg:col-span-2 bg-white rounded-xl border border-gray-200 shadow-sm">
-          <div className="p-5 border-b border-gray-200 flex items-center justify-between">
-            <h2 className="text-lg font-semibold text-gray-900">Recent Activity</h2>
-            <span className="text-xs text-gray-400">4 items</span>
+        {/* Session Duration */}
+        <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm flex flex-col items-center justify-center text-center">
+          <div className="w-12 h-12 bg-purple-100 rounded-full flex items-center justify-center mb-3">
+            <Clock className="w-6 h-6 text-purple-600" />
           </div>
-          <div className="p-5">
-            {announcements.length === 0 ? (
-              <div className="text-sm text-gray-500">No announcements.</div>
-            ) : announcements.map((announcement) => (
-              <div key={announcement.id} className="flex items-start mb-4 last:mb-0">
-                <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center mr-4 flex-shrink-0">
-                  <FileText className="w-5 h-5 text-blue-600" />
-                </div>
-                <div className="flex-1">
-                  <p className="font-medium text-gray-900">{announcement.title}</p>
-                  <p className="text-sm text-gray-500">{announcement.message}</p>
-                  <p className="text-xs text-gray-400 mt-1">{announcement.time}</p>
-                </div>
-                <ChevronRight className="w-5 h-5 text-gray-400" />
-              </div>
-            ))}
-          </div>
+          <p className="text-3xl font-bold text-gray-900 tracking-tight">{elapsedTime}</p>
+          <p className="text-sm font-medium text-gray-500 mt-1">Session Duration</p>
+          <p className="text-xs text-gray-400 mt-1">Since {startTimeLabel}</p>
         </div>
 
         {/* Session Summary */}
-        <div className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
+        <div className="lg:col-span-2 bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
           <h2 className="text-lg font-semibold text-gray-900 mb-4">Session Summary</h2>
           <div className="space-y-4">
             <div className="flex items-center justify-between">
@@ -240,14 +122,6 @@ function SessionDashboard() {
             <div className="flex items-center justify-between">
               <span className="text-sm text-gray-500">Status</span>
               <span className="px-2 py-1 bg-green-100 text-green-700 rounded-full text-xs font-medium">Active</span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-sm text-gray-500">Subject</span>
-              <span className="text-sm font-medium text-gray-900">—</span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-sm text-gray-500">Section</span>
-              <span className="text-sm font-medium text-gray-900">—</span>
             </div>
             <div className="flex items-center justify-between">
               <span className="text-sm text-gray-500">Duration</span>

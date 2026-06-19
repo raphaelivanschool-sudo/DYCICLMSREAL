@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { Outlet } from "react-router-dom";
 import {
@@ -41,6 +42,7 @@ const navigation = [
 function AdminLayout() {
   const location = useLocation();
   const navigate = useNavigate();
+  const [logoError, setLogoError] = useState(false);
 
   const handleLogout = () => {
     // Clear all localStorage items
@@ -60,9 +62,20 @@ function AdminLayout() {
       <div className="w-64 bg-[#1e293b] flex flex-col flex-shrink-0">
         {/* Logo Area */}
         <div className="h-16 flex items-center px-4 border-b border-slate-700">
-          <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center mr-3">
-            <Monitor className="w-5 h-5 text-white" />
-          </div>
+          {logoError ? (
+            <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center mr-3">
+              <Monitor className="w-5 h-5 text-white" />
+            </div>
+          ) : (
+            <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center mr-3 overflow-hidden">
+              <img
+                src="/dyci-logo.png"
+                alt="DYCI seal"
+                className="w-full h-full object-contain"
+                onError={() => setLogoError(true)}
+              />
+            </div>
+          )}
           <div>
             <h1 className="text-white font-semibold text-sm">DYCI Classroom</h1>
             <p className="text-slate-400 text-xs">Management</p>

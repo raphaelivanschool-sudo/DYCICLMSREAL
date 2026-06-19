@@ -14,6 +14,7 @@ function Login() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [logoError, setLogoError] = useState(false);
   const navigate = useNavigate();
 
   const handleSubmit = async (e) => {
@@ -65,8 +66,17 @@ function Login() {
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900 flex flex-col items-center justify-center p-4">
       {/* Header */}
       <div className="text-center mb-8">
-        <div className="w-20 h-20 bg-white rounded-full flex items-center justify-center mx-auto mb-4 shadow-xl">
-          <Monitor className="w-10 h-10 text-blue-700" />
+        <div className="w-20 h-20 bg-white rounded-full flex items-center justify-center mx-auto mb-4 shadow-xl overflow-hidden">
+          {logoError ? (
+            <Monitor className="w-10 h-10 text-blue-700" />
+          ) : (
+            <img
+              src="/dyci-logo.png"
+              alt="Dr. Yanga's Colleges, Inc. seal"
+              className="w-full h-full object-contain"
+              onError={() => setLogoError(true)}
+            />
+          )}
         </div>
         <h1 className="text-3xl font-bold text-white mb-2">Dr. Yanga's Colleges Inc.</h1>
         <p className="text-blue-200">Classroom Laboratory Management System</p>
