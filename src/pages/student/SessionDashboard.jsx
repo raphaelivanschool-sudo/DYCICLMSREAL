@@ -191,15 +191,6 @@ function SessionDashboard() {
             <p className="text-xs text-gray-400">Report issues</p>
           </div>
 
-          {/* My Grades */}
-          <div onClick={() => navigate('/student/my-grades')} className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm text-center cursor-pointer hover:shadow-md transition-shadow">
-            <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-3">
-              <CheckCircle className="w-6 h-6 text-green-600" />
-            </div>
-            <p className="font-medium text-gray-900">My Grades</p>
-            <p className="text-xs text-gray-400">View results</p>
-          </div>
-
           {/* Help Request */}
           <div onClick={() => navigate('/student/tickets')} className="bg-white rounded-xl border border-gray-200 p-5 shadow-sm text-center cursor-pointer hover:shadow-md transition-shadow">
             <div className="w-12 h-12 bg-purple-100 rounded-full flex items-center justify-center mx-auto mb-3">

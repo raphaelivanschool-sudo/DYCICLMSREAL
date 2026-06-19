@@ -14,7 +14,6 @@ import {
   User,
   Users,
   Calendar,
-  GraduationCap,
 } from "lucide-react";
 
 const navigation = [
@@ -37,7 +36,6 @@ const navigation = [
   { name: "Usage Reports", href: "/admin/reports", icon: FileSpreadsheet },
   { name: "Tickets / Support", href: "/admin/tickets", icon: Ticket },
   { name: "Inventory", href: "/admin/hardware-inventory", icon: Package },
-  { name: "Grading", href: "/admin/grading", icon: GraduationCap },
 ];
 
 function AdminLayout() {

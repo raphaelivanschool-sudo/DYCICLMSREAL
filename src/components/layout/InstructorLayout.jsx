@@ -8,7 +8,6 @@ import {
   LogOut,
   BookOpen,
   CheckCircle,
-  GraduationCap,
   FileSpreadsheet
 } from 'lucide-react';
 import { getUser } from '../../utils/auth';
@@ -20,7 +19,6 @@ const navigation = [
   { name: 'Messaging', href: '/instructor/messaging', icon: MessageCircle },
   { name: 'Ticket Approval', href: '/instructor/ticket-approval', icon: CheckCircle },
   { name: 'Reports', href: '/instructor/reports', icon: FileSpreadsheet },
-  { name: 'Grading', href: '/instructor/grading', icon: GraduationCap },
 ];
 
 function InstructorLayout() {

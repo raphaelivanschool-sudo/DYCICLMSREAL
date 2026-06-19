@@ -35,10 +35,6 @@ import SessionDashboard from "./pages/student/SessionDashboard";
 import SupportTicket from "./pages/student/SupportTicket";
 import StudentMessaging from "./pages/student/Messaging";
 
-// Grading imports
-import GradingPanel from "./pages/grading/GradingPanel";
-import MyGrades from "./pages/grading/MyGrades";
-
 // Agent Control imports
 import { AgentControlPage } from "./features/agent-control";
 
@@ -71,7 +67,6 @@ function App() {
           <Route path="tickets" element={<Tickets />} />
           <Route path="hardware-inventory" element={<HardwareInventory />} />
           <Route path="developer" element={<DeveloperModePage />} />
-          <Route path="grading" element={<GradingPanel />} />
           <Route path="agent-control" element={<AgentControlPage />} />
         </Route>
 
@@ -91,7 +86,6 @@ function App() {
           <Route path="messaging" element={<Messaging />} />
           <Route path="ticket-approval" element={<TicketApproval />} />
           <Route path="reports" element={<InstructorReports />} />
-          <Route path="grading" element={<GradingPanel />} />
         </Route>
 
         {/* Student Routes */}
@@ -107,7 +101,6 @@ function App() {
           <Route path="dashboard" element={<SessionDashboard />} />
           <Route path="tickets" element={<SupportTicket />} />
           <Route path="messaging" element={<StudentMessaging />} />
-          <Route path="my-grades" element={<MyGrades />} />
         </Route>
 
         {/* Catch all - Redirect to login */}

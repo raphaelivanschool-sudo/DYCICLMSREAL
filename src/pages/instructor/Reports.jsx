@@ -7,7 +7,6 @@ const INSTRUCTOR_REPORTS = [
     label: 'Attendance via Agent Presence',
     description:
       'For your scheduled lab sessions: which PCs were online, for how long, and first/last seen. (Attendance is per PC/room — agents report a PC, not a student account.)',
-    filters: [{ key: 'sectionId', label: 'Section ID', placeholder: 'Section ID (optional)' }],
   },
   {
     key: 'my-control-log',

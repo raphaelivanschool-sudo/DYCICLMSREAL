@@ -30,7 +30,6 @@ function criticalActionsWhereClause() {
       { action: { startsWith: 'LAB_' } },
       { action: { startsWith: 'COMPUTER_' } },
       { action: { startsWith: 'NETWORK_' } },
-      { action: { startsWith: 'GRADING_' } },
     ],
   };
 }

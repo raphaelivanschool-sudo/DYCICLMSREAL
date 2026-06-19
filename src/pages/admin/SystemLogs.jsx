@@ -190,7 +190,7 @@ function SystemLogs() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900">System Logs & Reports</h1>
           <p className="text-gray-500">
-            Audit trail for logins, lab/inventory/ticket/grading changes, network scans, and remote PC commands (lock,
+            Audit trail for logins, lab/inventory/ticket changes, network scans, and remote PC commands (lock,
             website block, Wi‑Fi, projection, etc.)
           </p>
         </div>

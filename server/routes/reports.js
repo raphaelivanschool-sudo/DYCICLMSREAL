@@ -402,29 +402,15 @@ router.get('/attendance', requireRole(['INSTRUCTOR']), async (req, res) => {
   try {
     const { gte, lte, startStr, endStr } = parseRange(req.query);
     const instructorId = req.user.id; // never trust the client
-    const sectionId = req.query.sectionId ? Number(req.query.sectionId) : null;
 
-    // The instructor's scheduled lab sessions (+ lab + linked sections/subjects).
+    // The instructor's scheduled lab sessions (+ lab). Class/subject labels come
+    // from the LabSchedule's own className/subjectCode columns.
     const schedules = await prisma.labSchedule.findMany({
       where: { instructorId },
       include: {
         laboratory: { include: { computers: true } },
-        sections: { include: { subject: true } },
       },
     });
-
-    // Optional section filter — must belong to this instructor.
-    let allowScheduleIds = null;
-    if (sectionId) {
-      const section = await prisma.section.findFirst({
-        where: { id: sectionId, instructorId },
-        select: { labScheduleId: true },
-      });
-      if (!section) {
-        return res.status(403).json({ message: 'Section not found for this instructor.' });
-      }
-      allowScheduleIds = new Set(section.labScheduleId ? [section.labScheduleId] : []);
-    }
 
     // Presence over the range, sessionized + indexed onto this instructor's lab PCs.
     const events = await prisma.agentPresenceLog.findMany({
@@ -436,13 +422,11 @@ router.get('/attendance', requireRole(['INSTRUCTOR']), async (req, res) => {
 
     const rows = [];
     for (const sched of schedules) {
-      if (allowScheduleIds && !allowScheduleIds.has(sched.id)) continue;
       const lab = sched.laboratory;
       if (!lab) continue;
 
-      const sectionLabel = sched.sections[0]?.name || sched.className || '';
-      const subjectLabel =
-        sched.sections[0]?.subject?.title || sched.subjectCode || '';
+      const sectionLabel = sched.className || '';
+      const subjectLabel = sched.subjectCode || '';
 
       const compIndex = buildComputerIndex(lab.computers || []);
       // agentKey-group → computer in this lab

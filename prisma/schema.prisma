@@ -29,11 +29,6 @@ model User {
   labSchedules   LabSchedule[]
   createdGroups  Group[]
   groupMemberships GroupMember[]
-  // Grading module
-  sections        Section[]       @relation("InstructorSections")
-  enrollments     Enrollment[]    @relation("StudentEnrollments")
-  gradedScores    Score[]         @relation("ScoreGrader")
-  gradeAuditLogs  GradeAuditLog[]
   agentActivityLogs AgentActivityLog[]
   controlActions  ControlActionLog[] @relation("ControlActor")
 }
@@ -340,7 +335,6 @@ model LabSchedule {
   // Relations
   laboratory      Laboratory @relation(fields: [laboratoryId], references: [id], onDelete: Cascade)
   instructor      User       @relation(fields: [instructorId], references: [id])
-  sections        Section[]
 }
 
 // Computer Software tracking
@@ -356,161 +350,6 @@ model ComputerSoftware {
   computer        Computer   @relation(fields: [computerId], references: [id], onDelete: Cascade)
 
   @@unique([computerId, softwareName])
-}
-
-// ============================================================
-// Grading Module — per-semester, 1.00–5.00 model
-// (3.00 = lowest passing at 75%, <75% = 5.00, INC supported, no 4.00)
-// ============================================================
-
-// The time container. Grades are given per semester.
-model Semester {
-  id        Int            @id @default(autoincrement())
-  name      String         // e.g. "1st Sem AY 2025-2026"
-  isActive  Boolean        @default(false)
-  status    SemesterStatus @default(OPEN)
-  createdAt DateTime       @default(now())
-  updatedAt DateTime       @updatedAt
-
-  sections  Section[]
-}
-
-// A course in the catalog. Units matter for GWA.
-model Subject {
-  id        Int      @id @default(autoincrement())
-  code      String   @unique
-  title     String
-  units     Float    @default(3)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  sections  Section[]
-}
-
-// An offering: a Subject taught by an instructor in a Semester.
-model Section {
-  id            Int      @id @default(autoincrement())
-  name          String   // e.g. "BSIT 3A"
-  subjectId     Int
-  instructorId  Int
-  semesterId    Int
-  labScheduleId Int?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-
-  subject     Subject      @relation(fields: [subjectId], references: [id], onDelete: Cascade)
-  instructor  User         @relation("InstructorSections", fields: [instructorId], references: [id])
-  semester    Semester     @relation(fields: [semesterId], references: [id], onDelete: Cascade)
-  labSchedule LabSchedule? @relation(fields: [labScheduleId], references: [id])
-
-  enrollments Enrollment[]
-  categories  GradeCategory[]
-
-  @@unique([subjectId, semesterId, name])
-}
-
-// A student's record in a section: holds the final grade for that subject that semester.
-model Enrollment {
-  id              Int         @id @default(autoincrement())
-  sectionId       Int
-  studentId       Int
-  finalPercentage Float?
-  gradePoint      Float?      // transmuted 1.00–5.00, null until computed (or if INC)
-  isInc           Boolean     @default(false)
-  gradeStatus     GradeStatus @default(IN_PROGRESS)
-  createdAt       DateTime    @default(now())
-  updatedAt       DateTime    @updatedAt
-
-  section Section @relation(fields: [sectionId], references: [id], onDelete: Cascade)
-  student User    @relation("StudentEnrollments", fields: [studentId], references: [id])
-  scores  Score[]
-
-  @@unique([sectionId, studentId])
-}
-
-// Weighted bucket per section (e.g. Class Standing 30, Laboratory 30, ...).
-model GradeCategory {
-  id        Int      @id @default(autoincrement())
-  sectionId Int
-  name      String
-  weight    Float    // percent; weights sum to 100 per section
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  section    Section    @relation(fields: [sectionId], references: [id], onDelete: Cascade)
-  activities Activity[]
-}
-
-// A gradeable item within a category.
-model Activity {
-  id            Int       @id @default(autoincrement())
-  categoryId    Int
-  title         String
-  maxScore      Float     @default(100)
-  dueDate       DateTime?
-  labScheduleId Int?      // optional link to a lab session/schedule
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-
-  category GradeCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
-  scores   Score[]
-}
-
-// One student's mark on one activity.
-model Score {
-  id           Int       @id @default(autoincrement())
-  activityId   Int
-  enrollmentId Int
-  rawScore     Float?
-  feedback     String?   @db.Text
-  gradedById   Int?
-  gradedAt     DateTime?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
-
-  activity   Activity   @relation(fields: [activityId], references: [id], onDelete: Cascade)
-  enrollment Enrollment @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
-  gradedBy   User?      @relation("ScoreGrader", fields: [gradedById], references: [id])
-
-  @@unique([activityId, enrollmentId])
-}
-
-// Configurable transmutation table: { minPercent..maxPercent -> gradePoint }.
-model GradeScale {
-  id         Int     @id @default(autoincrement())
-  minPercent Float
-  maxPercent Float
-  gradePoint Float
-  label      String?
-}
-
-// Accountability trail for grade-affecting actions.
-model GradeAuditLog {
-  id         Int      @id @default(autoincrement())
-  actorId    Int?
-  action     String
-  entityType String?
-  entityId   Int?
-  detail     String?  @db.Text
-  oldValue   String?
-  newValue   String?
-  reason     String?
-  createdAt  DateTime @default(now())
-
-  actor User? @relation(fields: [actorId], references: [id])
-
-  @@index([createdAt])
-}
-
-enum SemesterStatus {
-  OPEN
-  LOCKED
-}
-
-enum GradeStatus {
-  IN_PROGRESS
-  SUBMITTED
-  LOCKED
 }
 
 // Agent PC Control models
