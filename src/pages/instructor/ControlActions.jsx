@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Users, CheckCircle, Lock, MonitorUp, Wifi, WifiOff,
   MessageSquare, Globe, Plus, X, Send, Power, AlertTriangle, RefreshCw,
-  Square, CheckSquare, Circle, ShieldOff,
+  Square, CheckSquare, Circle, ShieldOff, Monitor,
 } from 'lucide-react';
 import socketService from '../../services/socketService';
 import useScreenProjection from '../../hooks/useScreenProjection';
@@ -54,6 +54,14 @@ function ControlActions() {
   // Website blocklist (managed)
   const [blocklist, setBlocklist] = useState(DEFAULT_BLOCKLIST);
   const [domainInput, setDomainInput] = useState('');
+
+  // Live "Show PC preview" — reuses the shared capture path (agentsApi.getScreenshot
+  // → Socket.IO → guest Python/mss). No second implementation, no stale-IP dialing.
+  const [previewDevice, setPreviewDevice] = useState(null); // device being previewed
+  const [previewUrl, setPreviewUrl] = useState('');
+  const [previewStatus, setPreviewStatus] = useState('');
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewAuto, setPreviewAuto] = useState(true);
 
   const {
     projectionActive, projectionStatus, startProjection, stopProjection,
@@ -270,6 +278,55 @@ function ControlActions() {
     sendToTargets('set_website_blocklist', { websites: blocklist }, targets);
   };
   const handleUnblockAll = () => sendToTargets('clear_website_blocklist', {}, targets);
+
+  // ---- Live PC preview (shared capture path: getScreenshot → Socket.IO → mss) ----
+  const requestPreview = useCallback(async (device, { silent = false } = {}) => {
+    if (!device?.agentId) return;
+    if (!silent) {
+      setPreviewLoading(true);
+      setPreviewStatus('Loading preview…');
+    }
+    try {
+      const res = await agentsApi.getScreenshot(device.agentId, { ip: device.ip, mac: device.mac });
+      const data = res?.data;
+      if (data?.success && data.screenshot) {
+        const fmt = (data.format || 'jpeg').toLowerCase();
+        const mime = fmt === 'png' ? 'image/png' : 'image/jpeg';
+        setPreviewUrl(`data:${mime};base64,${data.screenshot}`);
+        setPreviewStatus(`Live — updated ${new Date().toLocaleTimeString()}`);
+      } else if (!silent) {
+        setPreviewStatus(`Could not capture preview: ${data?.error || 'unknown error'}`);
+      }
+    } catch (e) {
+      if (!silent) {
+        setPreviewStatus(e?.response?.data?.error || e?.message || 'Could not capture preview');
+      }
+    } finally {
+      if (!silent) setPreviewLoading(false);
+    }
+  }, []);
+
+  const openPreview = (device) => {
+    setPreviewUrl('');
+    setPreviewStatus('');
+    setPreviewDevice(device);
+  };
+  const closePreview = () => {
+    setPreviewDevice(null);
+    setPreviewUrl('');
+    setPreviewStatus('');
+    setPreviewLoading(false);
+  };
+
+  // Auto-start the preview on open, then refresh every 3s while open + auto is on.
+  // The interval is torn down whenever the modal closes or auto-refresh is toggled.
+  useEffect(() => {
+    if (!previewDevice?.agentId) return undefined;
+    requestPreview(previewDevice, { silent: false }); // immediate first frame
+    if (!previewAuto) return undefined;
+    const id = window.setInterval(() => requestPreview(previewDevice, { silent: true }), 3000);
+    return () => window.clearInterval(id);
+  }, [previewDevice, previewAuto, requestPreview]);
 
   // ---- Projection (reuses the shared Locked Demo Mode engine) ----
   const handleProjectAll = () => {
@@ -557,6 +614,14 @@ function ControlActions() {
 
                   <div className="flex items-center gap-2 shrink-0">
                     <button
+                      onClick={() => openPreview(device)}
+                      disabled={!isOnline}
+                      title="Show a live preview of this PC"
+                      className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 hover:bg-emerald-100 text-xs font-medium disabled:opacity-40"
+                    >
+                      <Monitor className="w-3.5 h-3.5" /> Preview
+                    </button>
+                    <button
                       onClick={() => sendToTargets('lock', {}, [device])}
                       disabled={!isOnline}
                       className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-red-50 text-red-700 hover:bg-red-100 text-xs font-medium disabled:opacity-40"
@@ -661,6 +726,79 @@ function ControlActions() {
             onConfirm={handleConfirmDisableWifi}
           />
         </Modal>
+      )}
+
+      {/* Live PC preview modal */}
+      {previewDevice && (
+        <div className="modal-overlay" onClick={closePreview}>
+          <div
+            className="bg-white rounded-xl shadow-xl w-full max-w-3xl mx-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between p-4 border-b border-gray-200">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-10 h-10 rounded-lg flex items-center justify-center bg-emerald-100 shrink-0">
+                  <Monitor className="w-5 h-5 text-emerald-600" />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-lg font-semibold text-gray-900 truncate">
+                    {previewDevice.hostname || previewDevice.ip || 'PC preview'}
+                  </h3>
+                  <p className="text-sm text-gray-500 truncate">
+                    {previewDevice.user ? `${previewDevice.user} · ` : ''}{previewDevice.ip || '—'}
+                  </p>
+                </div>
+              </div>
+              <button onClick={closePreview} className="p-2 hover:bg-gray-100 rounded-lg" title="Close">
+                <X className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+
+            <div className="p-4">
+              <div className="rounded-xl border-2 border-gray-200 bg-gray-900 overflow-hidden aspect-video flex items-center justify-center">
+                {previewUrl ? (
+                  <img
+                    src={previewUrl}
+                    alt={`${previewDevice.hostname || previewDevice.ip} screen`}
+                    className="w-full h-full object-contain"
+                  />
+                ) : (
+                  <div className="text-center">
+                    <Monitor className="w-12 h-12 text-gray-500 mx-auto mb-2 animate-pulse" />
+                    <span className="text-sm text-gray-400">
+                      {previewLoading ? 'Loading preview…' : 'Waiting for preview…'}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-3 mt-4">
+                <p className={`text-sm ${previewStatus && !/^(Live|Loading)/.test(previewStatus) ? 'text-red-600' : 'text-gray-500'}`}>
+                  {previewStatus || 'Capture runs on the guest (Python/mss) over the agent connection.'}
+                </p>
+                <div className="flex items-center gap-3">
+                  <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      className="rounded border-gray-300"
+                      checked={previewAuto}
+                      onChange={(e) => setPreviewAuto(e.target.checked)}
+                    />
+                    Auto-refresh (3s)
+                  </label>
+                  <button
+                    onClick={() => requestPreview(previewDevice, { silent: false })}
+                    disabled={previewLoading}
+                    className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 text-sm font-medium disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-4 h-4 ${previewLoading ? 'animate-spin' : ''}`} />
+                    {previewLoading ? 'Loading…' : 'Refresh'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Toast */}

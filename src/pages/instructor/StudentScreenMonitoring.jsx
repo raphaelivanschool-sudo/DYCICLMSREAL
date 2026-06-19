@@ -167,25 +167,12 @@ function StudentScreenMonitoring() {
       pollDiscovery();
     });
 
-    // Secondary capture: pick up any screenshots delivered over the socket fallback.
-    const unsubShot = socketService.on('agent_command_result', (data) => {
-      if (!data || data.action !== 'screenshot' || !data.success || !data.result?.screenshot) return;
-      const id = data.computerId != null ? String(data.computerId) : null;
-      if (!id) return;
-      const fmt = (data.result.format || 'png').toLowerCase();
-      const mime = fmt === 'jpeg' || fmt === 'jpg' ? 'image/jpeg' : 'image/png';
-      setScreenshots((prev) => {
-        const n = new Map(prev);
-        n.set(id, { dataUrl: `data:${mime};base64,${data.result.screenshot}`, timestamp: Date.now(), stale: false });
-        return n;
-      });
-      pendingRef.current.delete(id);
-    });
-
     // Power/lock command results: upgrade a tile's "sent" chip to "acknowledged"
     // (agent ran it) or "failed" (e.g. privilege error) using the agent's reply.
+    // (Previews don't arrive here — they return inline from agentsApi.getScreenshot,
+    // which routes capture over the agent's Socket.IO connection server-side.)
     const unsubCmd = socketService.on('agent_command_result', (data) => {
-      if (!data || data.action === 'screenshot') return; // screenshots handled above
+      if (!data || data.action === 'screenshot') return; // previews handled via getScreenshot
       const id = data.computerId != null ? String(data.computerId) : null;
       if (!id) return;
       setResults((prev) => {
@@ -206,7 +193,6 @@ function StudentScreenMonitoring() {
       clearInterval(poll);
       unsubOnline?.();
       unsubOffline?.();
-      unsubShot?.();
       unsubCmd?.();
     };
   }, [pollDiscovery]);
@@ -279,6 +265,20 @@ function StudentScreenMonitoring() {
     }, SCHEDULER_TICK_MS);
     return () => clearInterval(id);
   }, [fetchShot]);
+
+  // When a PC's detail modal opens, fetch its preview immediately (don't wait for
+  // the scheduler's TTL) so the live image appears within ~1–2s — no manual click.
+  // The scheduler then keeps the focused tile refreshing while the modal is open;
+  // closing it (selectedId → null) stops the loop because the tile is no longer
+  // "shown", so capture halts and nothing leaks in the background.
+  useEffect(() => {
+    if (!selectedId) return;
+    const dev = devicesRef.current.get(selectedId);
+    if (dev?.status === 'online' && dev.agentId && !pendingRef.current.has(selectedId)) {
+      lastShotAtRef.current.delete(selectedId); // bypass the per-tile throttle for the open
+      fetchShot(dev);
+    }
+  }, [selectedId, fetchShot]);
 
   // ---- Visibility tracking so off-screen tiles aren't fetched (scales to a full lab). ----
   useEffect(() => {

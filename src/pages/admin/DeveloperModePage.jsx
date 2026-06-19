@@ -95,11 +95,7 @@ function DeveloperModePage() {
   } = useScreenProjection();
   const [selectedRows, setSelectedRows] = useState(() => new Set()); // agentIds checked
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const selectedAgentIdRef = useRef(null);
-  const commandTargetComputerIdRef = useRef(null);
-  const pendingScreenshotCommandRef = useRef(false);
   const selectedDisplayRef = useRef({ host: 'PC', ip: '' });
-  const lastScreenshotRequestRef = useRef({ silent: false });
 
   const results = useMemo(() => {
     const items = Object.values(resultsByIp);
@@ -116,11 +112,6 @@ function DeveloperModePage() {
   const selectedDevice = results.find((d) => d.ip === selectedIp) || null;
 
   useEffect(() => {
-    selectedAgentIdRef.current = selectedDevice?.agentId || null;
-    commandTargetComputerIdRef.current = selectedDevice?.agentId || null;
-  }, [selectedDevice?.agentId]);
-
-  useEffect(() => {
     const d = Object.values(resultsByIp).find((x) => x.ip === selectedIp);
     const host = d?.user || d?.hostname || selectedIp || 'PC';
     selectedDisplayRef.current = { ip: selectedIp || '', host };
@@ -130,7 +121,6 @@ function DeveloperModePage() {
     setScreenshotUrl('');
     setScreenshotStatus('');
     setScreenshotFetching(false);
-    pendingScreenshotCommandRef.current = false;
   }, [selectedIp]);
 
   const lockDevice = async (device) => {
@@ -152,11 +142,7 @@ function DeveloperModePage() {
       if (!device.ip) {
         throw new Error('Missing IP for this row.');
       }
-      const res = await agentsApi.sendCommand(device.agentId, 'lock', {}, { ip: device.ip, mac: device.mac });
-      const rid = res?.data?.resolvedComputerId;
-      if (rid) {
-        commandTargetComputerIdRef.current = rid;
-      }
+      await agentsApi.sendCommand(device.agentId, 'lock', {}, { ip: device.ip, mac: device.mac });
       setLockStatus(`✓ ${hostname} Locked`);
       setLockError('');
     } catch (error) {
@@ -184,11 +170,7 @@ function DeveloperModePage() {
     setShutdownError('');
 
     try {
-      const res = await agentsApi.sendCommand(device.agentId, 'shutdown', { delay: 0 }, { ip: device.ip, mac: device.mac });
-      const rid = res?.data?.resolvedComputerId;
-      if (rid) {
-        commandTargetComputerIdRef.current = rid;
-      }
+      await agentsApi.sendCommand(device.agentId, 'shutdown', { delay: 0 }, { ip: device.ip, mac: device.mac });
       setShutdownStatus(`✓ Shutdown command sent to ${hostname} (${ip})`);
       setShutdownError('');
     } catch (error) {
@@ -200,51 +182,9 @@ function DeveloperModePage() {
     }
   };
 
-  const applyScreenshotResult = useCallback((event) => {
-    if (event.action !== 'screenshot') return;
-    const candidates = [selectedAgentIdRef.current, commandTargetComputerIdRef.current].filter(Boolean);
-    let matches = Boolean(event.computerId && candidates.includes(event.computerId));
-    if (!matches && pendingScreenshotCommandRef.current && event.computerId) {
-      pendingScreenshotCommandRef.current = false;
-      commandTargetComputerIdRef.current = event.computerId;
-      matches = true;
-    }
-    if (!matches) return;
-    pendingScreenshotCommandRef.current = false;
-
-    const { silent } = lastScreenshotRequestRef.current;
-    setScreenshotFetching(false);
-
-    if (event.success && event.result?.screenshot) {
-      const fmt = (event.result.format || 'png').toLowerCase();
-      const mime =
-        fmt === 'jpeg' || fmt === 'jpg'
-          ? 'image/jpeg'
-          : fmt === 'png'
-            ? 'image/png'
-            : 'image/png';
-      setScreenshotUrl(`data:${mime};base64,${event.result.screenshot}`);
-      const t = new Date().toLocaleTimeString();
-      const host = selectedDisplayRef.current.host;
-      if (!silent) {
-        setScreenshotStatus(`✓ Screenshot updated — ${host} — Last updated: ${t}`);
-      } else {
-        setScreenshotStatus(`Live — ${host} — Last updated: ${t}`);
-      }
-      return;
-    }
-
-    const msg = event.error || event.result?.error || 'Screenshot failed';
-    if (!silent) {
-      setScreenshotStatus(`✗ Error: ${msg}`);
-    }
-  }, []);
-
-  useEffect(() => {
-    const unsub = socketService.on('agent_command_result', applyScreenshotResult);
-    return unsub;
-  }, [applyScreenshotResult]);
-
+  // Request a live preview. The capture is done in-process on the guest (Python
+  // mss) and relayed over the agent's Socket.IO connection — see the rewritten
+  // POST /api/agents/screenshot. No LAN IP is dialed and no temp .ps1 is run.
   const requestScreenshot = useCallback(
     async ({ silent = false } = {}) => {
       const agentId = selectedDevice?.agentId;
@@ -256,13 +196,11 @@ function DeveloperModePage() {
         }
         return;
       }
-      lastScreenshotRequestRef.current = { silent };
       if (!silent) {
         setScreenshotFetching(true);
-        setScreenshotStatus('Fetching screenshot...');
+        setScreenshotStatus('Loading preview…');
       }
 
-      // Primary: pull a live JPEG from the guest's Python agent over HTTP (5555).
       try {
         const res = await agentsApi.getScreenshot(agentId, { ip, mac });
         const data = res?.data;
@@ -270,34 +208,19 @@ function DeveloperModePage() {
           const fmt = (data.format || 'jpeg').toLowerCase();
           const mime = fmt === 'png' ? 'image/png' : 'image/jpeg';
           setScreenshotUrl(`data:${mime};base64,${data.screenshot}`);
-          setScreenshotFetching(false);
-          if (data.resolvedComputerId) commandTargetComputerIdRef.current = data.resolvedComputerId;
           const t = new Date().toLocaleTimeString();
           const host = selectedDisplayRef.current.host;
-          setScreenshotStatus(`${silent ? 'Live' : '✓ Screenshot updated'} — ${host} — Last updated: ${t}`);
-          return;
+          setScreenshotStatus(`Live — ${host} — Last updated: ${t}`);
+        } else if (!silent) {
+          setScreenshotStatus(`✗ Error: ${data?.error || 'Could not capture preview'}`);
         }
       } catch (error) {
-        console.warn(
-          '[Screenshot] HTTP path failed, falling back to agent command:',
-          error?.response?.data?.error || error?.message,
-        );
-      }
-
-      // Fallback: ask the Node agent to capture (PowerShell .NET) via Socket.IO;
-      // the result arrives asynchronously on the agent_command_result event.
-      pendingScreenshotCommandRef.current = true;
-      try {
-        const res = await agentsApi.sendCommand(agentId, 'screenshot', {}, { ip, mac });
-        const rid = res?.data?.resolvedComputerId;
-        if (rid) commandTargetComputerIdRef.current = rid;
-      } catch (error) {
-        pendingScreenshotCommandRef.current = false;
-        setScreenshotFetching(false);
         if (!silent) {
-          const msg = error.response?.data?.error || error.message || 'Could not capture screenshot';
+          const msg = error.response?.data?.error || error.message || 'Could not capture preview';
           setScreenshotStatus(`✗ Error: ${msg}`);
         }
+      } finally {
+        if (!silent) setScreenshotFetching(false);
       }
     },
     [selectedDevice?.agentId, selectedDevice?.ip, selectedDevice?.mac]
@@ -937,13 +860,13 @@ function DeveloperModePage() {
               <div className="flex flex-wrap items-center gap-3">
                 <button
                   type="button"
-                  title="Get latest screenshot of selected PC"
+                  title="Show a live preview of the selected PC"
                   onClick={() => requestScreenshot({ silent: false })}
                   disabled={!selectedDevice?.ip || screenshotFetching}
                   className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <RefreshCw className={`w-4 h-4 ${screenshotFetching ? 'animate-spin' : ''}`} />
-                  {screenshotFetching ? 'Fetching…' : '📺 Refresh screenshot'}
+                  {screenshotFetching ? 'Loading…' : '📺 Show PC preview'}
                 </button>
                 <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer select-none">
                   <input
@@ -1061,8 +984,9 @@ function DeveloperModePage() {
                 />
               ) : (
                 <p className="text-center text-gray-400 text-sm px-6 py-12 max-w-md">
-                  Click “Refresh screenshot”. Commands route by this row&apos;s IP (and MAC when present) to an online
-                  agent when one matches — including scan-only rows when the agent reports the same LAN address.
+                  Click “Show PC preview” for a live image of this PC. The capture runs on the guest (Python/mss)
+                  and is relayed over the agent connection — no LAN IP is dialed. Turn on Auto-refresh for a
+                  near-real-time view.
                 </p>
               )}
             </div>

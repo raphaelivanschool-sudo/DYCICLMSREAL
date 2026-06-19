@@ -15,6 +15,7 @@ import {
   summarizePayload,
 } from '../utils/activityLog.js';
 import { recordControlAction, resolveTarget } from '../utils/controlLog.js';
+import { createAgentRequest } from '../utils/agentRpc.js';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -367,24 +368,19 @@ router.post('/command', authenticateToken, async (req, res) => {
 
 
 /**
- * Live screenshot of a guest — primary capture path.
+ * Live screenshot / "Show PC preview" of a guest.
  *
- * Fetches the JPEG from the guest's Python agent (Flask on TCP 5555, mss/Pillow)
- * using the shared api_key. This replaces the fragile screenshot-desktop
- * (.bat/.exe) backend in the Node agent, which remains only as a socket fallback.
+ * Routing (the same lesson as projection): the capture is requested over the
+ * guest's *reliable* Socket.IO connection, keyed by computer id — we never dial
+ * a (possibly stale) LAN IP here. The server emits `screenshot` with a
+ * correlation id; the Node agent grabs the frame in-process via the local Python
+ * capture agent (mss + Pillow over 127.0.0.1 — no temp .ps1, nothing for AMSI to
+ * flag) and echoes the JPEG back in its `command_result`, which settles the
+ * awaiting request below.
  */
 router.post('/screenshot', authenticateToken, async (req, res) => {
   try {
-    const apiKey = getPcAgentApiKey();
-    if (!apiKey) {
-      return res.status(503).json({
-        success: false,
-        error:
-          `Screenshot unavailable: Python agent api_key not configured. Set PC_AGENT_API_KEY in server/.env ` +
-          `or sync agent_config.json (see ${getPcAgentConfigPathTried()}).`,
-      });
-    }
-
+    const io = req.app.get('io');
     const connectedComputers = req.app.get('connectedComputers');
     const { computerId, ip, mac } = req.body || {};
     const { targetId, strategy } = pickAgentTargetId(connectedComputers, { computerId, ip, mac });
@@ -395,52 +391,40 @@ router.post('/screenshot', authenticateToken, async (req, res) => {
       });
     }
 
-    const lanIp = resolveLanIpForPcAgent(connectedComputers, targetId, ip);
-    if (!lanIp) {
-      return res.status(400).json({ success: false, error: 'Could not resolve the guest agent LAN IP.' });
-    }
+    const { requestId, promise } = createAgentRequest(15000);
+    io.to(`computer_${targetId}`).emit('execute_command', {
+      action: 'screenshot',
+      params: {},
+      requestId, // settled in the command_result handler (no user-room relay needed)
+      timestamp: new Date(),
+    });
 
-    const url = `http://${lanIp}:${PC_AGENT_PORT}/screenshot`;
-    let guestResp;
-    try {
-      guestResp = await axios.get(url, {
-        headers: { Authorization: `Bearer ${apiKey}` },
-        timeout: 12000,
-        validateStatus: () => true,
-      });
-    } catch (e) {
-      const msg =
-        e.code === 'ECONNREFUSED' || e.code === 'ETIMEDOUT' || e.code === 'EHOSTUNREACH'
-          ? `Could not reach the Python agent at ${lanIp}:${PC_AGENT_PORT}. Confirm it is running and that the guest firewall allows TCP ${PC_AGENT_PORT} on the LAN.`
-          : e.message || 'Screenshot request failed';
-      return res.status(502).json({ success: false, error: msg });
-    }
-
-    if (guestResp.status === 401 || guestResp.status === 403) {
-      return res.status(guestResp.status).json({
+    const reply = await promise;
+    if (reply.timedOut) {
+      return res.status(504).json({
         success: false,
-        error: 'Guest agent rejected the api_key — it must match the server (PC_AGENT_API_KEY / agent_config.json).',
+        error:
+          'The guest did not return a preview in time. Make sure the DYCI capture agent (Python, mss) is running on that PC.',
       });
     }
-    if (guestResp.status !== 200 || !guestResp.data?.screenshot) {
-      const detail =
-        (typeof guestResp.data === 'object' && guestResp.data?.error) ||
-        guestResp.statusText ||
-        String(guestResp.status);
-      return res.status(502).json({ success: false, error: `Guest agent screenshot failed: ${detail}` });
+    if (!reply.success || !reply.result?.screenshot) {
+      return res.status(502).json({
+        success: false,
+        error: reply.error || reply.result?.error || 'Preview capture failed on the guest.',
+      });
     }
 
     return res.json({
       success: true,
-      screenshot: guestResp.data.screenshot,
-      format: guestResp.data.format || 'jpeg',
-      timestamp: guestResp.data.timestamp || new Date().toISOString(),
+      screenshot: reply.result.screenshot,
+      format: reply.result.format || 'jpeg',
+      timestamp: reply.result.timestamp || new Date().toISOString(),
       resolvedComputerId: targetId,
       resolutionStrategy: strategy,
     });
   } catch (error) {
     console.error('[agents/screenshot]', error);
-    res.status(500).json({ success: false, error: 'Screenshot failed (server error)' });
+    res.status(500).json({ success: false, error: 'Preview failed (server error)' });
   }
 });
 

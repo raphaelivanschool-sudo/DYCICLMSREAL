@@ -13,6 +13,7 @@ import { projectionManager } from "./utils/projectionSession.js";
 import { recordActivity } from "./utils/activityLog.js";
 import { recordPresence, touchAgentSeen } from "./utils/presenceLog.js";
 import { recordControlAction } from "./utils/controlLog.js";
+import { resolveAgentRequest } from "./utils/agentRpc.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -282,8 +283,15 @@ io.on("connection", (socket) => {
         success,
         result,
         error,
-        from
+        from,
+        requestId
       } = resultData || {};
+
+      // Settle any server-side RPC awaiting this result (e.g. the screenshot
+      // route, which routes capture over Socket.IO instead of dialing a LAN IP).
+      if (requestId) {
+        resolveAgentRequest(requestId, { success, result, error, action });
+      }
 
       let computerId = null;
       for (const [id, computer] of connectedComputers.entries()) {

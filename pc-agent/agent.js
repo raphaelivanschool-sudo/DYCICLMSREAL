@@ -666,7 +666,8 @@ async function executeCommand(command) {
       action,
       success: true,
       result,
-      from: command?.from
+      from: command?.from,
+      requestId: command?.requestId // lets a server-side RPC (e.g. screenshot) correlate this reply
     });
   } catch (error) {
     console.error(`Error executing command "${action}":`, error.message);
@@ -674,7 +675,8 @@ async function executeCommand(command) {
       action,
       success: false,
       error: error.message || 'Unknown command execution error',
-      from: command?.from
+      from: command?.from,
+      requestId: command?.requestId
     });
   }
 }
@@ -910,56 +912,117 @@ async function enableWifiAdapter(preferredAdapterName) {
   };
 }
 
+// ---- Screenshot ("Show PC preview") capture ----
+//
+// Capture is done IN-PROCESS by the local Python agent (mss + Pillow), reached
+// over LOCALHOST only. We deliberately do NOT write a temp .ps1 and run it:
+// dropping/executing a capture script in %TEMP% is a malware-like pattern that
+// Defender/AMSI blocks ("ScriptContainedMaliciousContent"). No temp files, no
+// spawned scripts here — just a localhost HTTP GET to the already-running agent.
+
+/** TCP port of the local Python capture agent (env > agent.config.json > 5555). */
+function resolvePcAgentHttpPort() {
+  const fromEnv = parseInt(process.env.PC_AGENT_HTTP_PORT || '', 10);
+  if (Number.isInteger(fromEnv) && fromEnv > 0) return fromEnv;
+  const fromCfg = parseInt(fileConfig?.pcAgentHttpPort || '', 10);
+  if (Number.isInteger(fromCfg) && fromCfg > 0) return fromCfg;
+  return 5555;
+}
+
+let cachedPcAgentApiKey;
 /**
- * Capture the guest desktop via PowerShell + .NET (System.Drawing.CopyFromScreen).
- * This is the Socket.IO *fallback* path — the primary screenshot path is the
- * Python agent over HTTP 5555. Uses no external .exe, so it avoids the fragile
- * screenshot-desktop bat/exe that breaks when its companion exe is missing.
+ * Bearer token for the local Python capture agent. Resolution order mirrors the
+ * server's getPcAgentApiKey(): env var, then config override, then the shared
+ * agent_config.json that the Python agent itself reads.
+ */
+function resolvePcAgentApiKey() {
+  const fromEnv = (process.env.PC_AGENT_API_KEY || '').trim();
+  if (fromEnv) return fromEnv;
+  if (typeof fileConfig?.pcAgentApiKey === 'string' && fileConfig.pcAgentApiKey.trim()) {
+    return fileConfig.pcAgentApiKey.trim();
+  }
+  if (cachedPcAgentApiKey !== undefined) return cachedPcAgentApiKey;
+
+  const candidates = [
+    process.env.PC_AGENT_CONFIG_PATH,
+    path.join(__dirname, 'agent_config.json'),
+    path.join(__dirname, 'python', 'agent_config.json'),
+    path.join(__dirname, '..', 'agent', 'pc-agent', 'python', 'agent_config.json'),
+    path.join(__dirname, '..', 'pc-agent', 'python', 'agent_config.json'),
+  ].filter(Boolean);
+  for (const c of candidates) {
+    try {
+      const j = JSON.parse(fsSync.readFileSync(c, 'utf8'));
+      if (typeof j.api_key === 'string' && j.api_key.trim()) {
+        cachedPcAgentApiKey = j.api_key.trim();
+        return cachedPcAgentApiKey;
+      }
+    } catch { /* try next candidate */ }
+  }
+  cachedPcAgentApiKey = '';
+  return '';
+}
+
+/** GET a JSON body from the local capture agent over plain HTTP (localhost only). */
+function httpGetLocalJson(urlStr, apiKey, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(urlStr);
+    const req = http.request(
+      {
+        hostname: u.hostname,
+        port: u.port,
+        path: u.pathname + u.search,
+        method: 'GET',
+        headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+        timeout: timeoutMs,
+      },
+      (resp) => {
+        const chunks = [];
+        resp.on('data', (d) => chunks.push(d));
+        resp.on('end', () => {
+          const body = Buffer.concat(chunks).toString('utf8');
+          let json = null;
+          try { json = body ? JSON.parse(body) : null; } catch { /* non-JSON body */ }
+          resolve({ status: resp.statusCode || 0, json, body });
+        });
+      },
+    );
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+/**
+ * Capture the guest desktop by asking the local Python agent for a JPEG (mss).
+ * Reached over 127.0.0.1 — never a dialed LAN IP — and the bytes are relayed back
+ * over Socket.IO. In-process capture, no temp script, no external binary.
  */
 async function takeScreenshot() {
-  if (process.platform !== 'win32') {
-    throw new Error('Screenshot capture is only implemented for Windows guests');
-  }
-  const stamp = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
-  const outPath = path.join(os.tmpdir(), `dyci_shot_${stamp}.jpg`);
-  const ps1Path = path.join(os.tmpdir(), `dyci_shot_${stamp}.ps1`);
-  const outEsc = outPath.replace(/\\/g, '\\\\');
-  const script = `
-$ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$b = [System.Windows.Forms.SystemInformation]::VirtualScreen
-$bmp = New-Object System.Drawing.Bitmap($b.Width, $b.Height)
-$g = [System.Drawing.Graphics]::FromImage($bmp)
-$g.CopyFromScreen($b.X, $b.Y, 0, 0, $bmp.Size)
-$enc = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' } | Select-Object -First 1
-$ep = New-Object System.Drawing.Imaging.EncoderParameters(1)
-$ep.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, [long]70)
-$bmp.Save('${outEsc}', $enc, $ep)
-$g.Dispose(); $bmp.Dispose()
-`;
-  await fs.writeFile(ps1Path, script, 'utf8');
+  const port = resolvePcAgentHttpPort();
+  const apiKey = resolvePcAgentApiKey();
+  let resp;
   try {
-    await new Promise((resolve, reject) => {
-      execFile(
-        'powershell.exe',
-        ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ps1Path],
-        { windowsHide: true, timeout: 15000 },
-        (err, _stdout, stderr) => (err ? reject(new Error((stderr || err.message || '').trim())) : resolve()),
-      );
-    });
-    const buf = await fs.readFile(outPath);
-    if (!buf || !buf.length) throw new Error('Empty screenshot capture');
-    return {
-      success: true,
-      screenshot: buf.toString('base64'),
-      format: 'jpeg',
-      timestamp: new Date().toISOString(),
-    };
-  } finally {
-    fs.unlink(outPath).catch(() => {});
-    fs.unlink(ps1Path).catch(() => {});
+    resp = await httpGetLocalJson(`http://127.0.0.1:${port}/screenshot`, apiKey, 15000);
+  } catch (err) {
+    const why = err && err.code === 'ECONNREFUSED'
+      ? `the local capture agent isn't listening on 127.0.0.1:${port}`
+      : (err?.message || 'request failed');
+    throw new Error(`Could not reach the local capture agent (${why}). Start the DYCI Python agent on this PC.`);
   }
+  if (resp.status === 401 || resp.status === 403) {
+    throw new Error('Local capture agent rejected the api_key — it must match PC_AGENT_API_KEY / agent_config.json.');
+  }
+  if (resp.status !== 200 || !resp.json?.screenshot) {
+    const detail = resp.json?.error || `HTTP ${resp.status}`;
+    throw new Error(`Local capture agent screenshot failed: ${detail}`);
+  }
+  return {
+    success: true,
+    screenshot: resp.json.screenshot,
+    format: resp.json.format || 'jpeg',
+    timestamp: resp.json.timestamp || new Date().toISOString(),
+  };
 }
 
 // ---- Locked overlay subprocess management ----

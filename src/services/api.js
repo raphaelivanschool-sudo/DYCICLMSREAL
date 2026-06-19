@@ -137,7 +137,9 @@ export const agentsApi = {
     return api.post("/api/agents/command", body);
   },
 
-  // Live screenshot via the guest Python agent (HTTP 5555). Returns base64 JPEG.
+  // Live "Show PC preview": the server requests an in-process capture over the
+  // guest's Socket.IO connection (no LAN IP dialed); the guest grabs it via the
+  // local Python/mss agent. Returns base64 JPEG in the response.
   getScreenshot: (computerId, meta = {}) => {
     const body = {};
     if (computerId) body.computerId = computerId;
