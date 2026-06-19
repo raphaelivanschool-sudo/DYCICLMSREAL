@@ -24,6 +24,17 @@ const HOSTS_PATH = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
 const BLOCK_START_MARKER = '# DYCICLMS_WEBSITE_BLOCK_START';
 const BLOCK_END_MARKER = '# DYCICLMS_WEBSITE_BLOCK_END';
 
+// Kept in sync with pc-agent/agent.js (the dev/server agent). A hosts entry
+// matches one exact hostname, so each blocked domain is expanded to the apex
+// plus these common www/mobile fronts. Browser Secure DNS (DoH) bypasses the
+// hosts file, so we force it OFF via managed policy while blocking is active.
+const BLOCK_SUBDOMAINS = ['www', 'm', 'web', 'mobile'];
+const DOH_POLICY_KEYS = [
+  { browser: 'Edge', key: 'HKLM\\SOFTWARE\\Policies\\Microsoft\\Edge' },
+  { browser: 'Chrome', key: 'HKLM\\SOFTWARE\\Policies\\Google\\Chrome' },
+];
+const DOH_POLICY_VALUE = 'DnsOverHttpsMode';
+
 // ---- Internet block via Windows Firewall (managed outbound block rule) ----
 // Scoped to the PUBLIC IPv4 ranges only so the LAN + LMS server stay reachable and
 // the agent never severs its own control channel. See blockInternet()/allowInternet().
@@ -754,6 +765,9 @@ class PCAgent {
         case 'clear_website_blocklist':
           result = await this.clearWebsiteBlocklist();
           break;
+        case 'get_website_blocklist':
+          result = await this.getWebsiteBlocklist();
+          break;
         case 'block_internet':
           result = await this.blockInternet();
           break;
@@ -957,26 +971,49 @@ class PCAgent {
     return password;
   }
 
+  // Collapse each entry to a registrable BASE domain (peel www/mobile fronts
+  // only while ≥2 labels remain), matching pc-agent/agent.js.
   sanitizeWebsites(websites = []) {
     const cleaned = new Set();
-    websites.forEach((website) => {
-      const normalized = String(website || '')
-        .trim()
-        .toLowerCase()
-        .replace(/^https?:\/\//, '')
-        .replace(/^www\./, '')
-        .split('/')[0];
-      if (normalized) cleaned.add(normalized);
+    (Array.isArray(websites) ? websites : []).forEach((website) => {
+      let host = String(website || '').trim().toLowerCase();
+      host = host.replace(/^[a-z]+:\/\//, '');
+      host = host.split('/')[0].split('?')[0].split('#')[0];
+      host = host.split(':')[0].replace(/\.+$/, '').trim();
+      let prev;
+      do {
+        prev = host;
+        for (const sub of BLOCK_SUBDOMAINS) {
+          if (host.startsWith(`${sub}.`)) {
+            const candidate = host.slice(sub.length + 1);
+            if (candidate.includes('.')) host = candidate;
+          }
+        }
+      } while (host !== prev);
+      if (host && host.includes('.') && !/\s/.test(host)) cleaned.add(host);
     });
     return Array.from(cleaned);
   }
 
-  buildBlockSection(websites) {
-    const lines = [BLOCK_START_MARKER];
-    websites.forEach((site) => {
-      lines.push(`127.0.0.1 ${site}`);
-      lines.push(`127.0.0.1 www.${site}`);
+  expandHosts(bases) {
+    const hosts = [];
+    const seen = new Set();
+    bases.forEach((base) => {
+      [base, ...BLOCK_SUBDOMAINS.map((s) => `${s}.${base}`)].forEach((h) => {
+        if (!seen.has(h)) {
+          seen.add(h);
+          hosts.push(h);
+        }
+      });
     });
+    return hosts;
+  }
+
+  buildBlockSection(hosts) {
+    // 0.0.0.0 (no-route sink) fails fast on every modern browser and avoids the
+    // guest's own loopback services answering, unlike the old 127.0.0.1.
+    const lines = [BLOCK_START_MARKER];
+    hosts.forEach((h) => lines.push(`0.0.0.0 ${h}`));
     lines.push(BLOCK_END_MARKER);
     return `${lines.join('\r\n')}\r\n`;
   }
@@ -989,22 +1026,76 @@ class PCAgent {
     return content.replace(sectionRegex, '');
   }
 
+  async flushDns() {
+    if (process.platform !== 'win32') return;
+    try {
+      await execAsync('ipconfig /flushdns');
+    } catch (err) {
+      this.logger?.debug?.(`[Hosts] ipconfig /flushdns failed (non-fatal): ${err.message}`);
+    }
+  }
+
+  async setBrowserSecureDns(mode) {
+    const changed = [];
+    const failed = [];
+    if (process.platform !== 'win32') return { changed, failed };
+    for (const { browser, key } of DOH_POLICY_KEYS) {
+      const cmd =
+        mode === 'off'
+          ? `reg add "${key}" /v ${DOH_POLICY_VALUE} /t REG_SZ /d off /f`
+          : `reg delete "${key}" /v ${DOH_POLICY_VALUE} /f`;
+      try {
+        await execAsync(cmd);
+        changed.push(browser);
+      } catch (err) {
+        const msg = String(err.message || '').split('\n')[0].trim();
+        if (mode === 'restore' && /cannot find|unable to find|was not found|not exist/i.test(msg)) {
+          continue;
+        }
+        failed.push({ browser, error: msg.slice(0, 200) });
+      }
+    }
+    return { changed, failed };
+  }
+
   async setWebsiteBlocklist(websites = []) {
     if (process.platform !== 'win32') {
       throw new Error('Website blocking currently supports Windows only');
     }
 
-    const sanitized = this.sanitizeWebsites(websites);
-    if (sanitized.length === 0) {
+    const bases = this.sanitizeWebsites(websites);
+    if (bases.length === 0) {
       throw new Error('No valid websites provided');
     }
+    const hosts = this.expandHosts(bases);
 
     try {
       let hostsContent = await fs.promises.readFile(HOSTS_PATH, 'utf8');
       hostsContent = this.removeManagedBlockSection(hostsContent).trimEnd();
-      hostsContent += `\r\n\r\n${this.buildBlockSection(sanitized)}`;
+      hostsContent += `\r\n\r\n${this.buildBlockSection(hosts)}`;
       await fs.promises.writeFile(HOSTS_PATH, hostsContent, 'utf8');
-      return { success: true, blockedSites: sanitized };
+
+      const doh = await this.setBrowserSecureDns('off');
+      await this.flushDns();
+
+      const warnings = [];
+      if (doh.failed.length) {
+        warnings.push(
+          `Could not disable Secure DNS (DoH) for ${doh.failed.map((f) => f.browser).join(', ')} — ` +
+            `run the agent as Administrator or DoH can bypass hosts blocking (${doh.failed[0].error})`
+        );
+      }
+      return {
+        success: true,
+        blockedDomains: bases,
+        blockedHosts: hosts,
+        secureDnsDisabledFor: doh.changed,
+        warnings,
+        message:
+          `Blocking ${bases.length} site(s) (${hosts.length} host variants); ` +
+          `Secure DNS off for ${doh.changed.join(', ') || 'no browsers'}` +
+          (warnings.length ? ` — ${warnings.join('; ')}` : ''),
+      };
     } catch (error) {
       throw new Error(`Failed to update hosts file: ${error.message}`);
     }
@@ -1019,10 +1110,51 @@ class PCAgent {
       const hostsContent = await fs.promises.readFile(HOSTS_PATH, 'utf8');
       const updatedContent = this.removeManagedBlockSection(hostsContent).trimEnd() + '\r\n';
       await fs.promises.writeFile(HOSTS_PATH, updatedContent, 'utf8');
-      return { success: true, cleared: true };
+
+      const doh = await this.setBrowserSecureDns('restore');
+      await this.flushDns();
+
+      const warnings = [];
+      if (doh.failed.length) {
+        warnings.push(
+          `Could not restore Secure DNS for ${doh.failed.map((f) => f.browser).join(', ')} (${doh.failed[0].error})`
+        );
+      }
+      return {
+        success: true,
+        cleared: true,
+        blockedDomains: [],
+        blockedHosts: [],
+        secureDnsRestoredFor: doh.changed,
+        warnings,
+        message: 'Cleared all blocked sites; Secure DNS restored',
+      };
     } catch (error) {
       throw new Error(`Failed to clear hosts file blocklist: ${error.message}`);
     }
+  }
+
+  async getWebsiteBlocklist() {
+    if (process.platform !== 'win32') {
+      return { blockedDomains: [], blockedHosts: [] };
+    }
+    let content = '';
+    try {
+      content = await fs.promises.readFile(HOSTS_PATH, 'utf8');
+    } catch {
+      return { blockedDomains: [], blockedHosts: [] };
+    }
+    const start = content.indexOf(BLOCK_START_MARKER);
+    const end = content.indexOf(BLOCK_END_MARKER);
+    const hosts = [];
+    if (start !== -1 && end !== -1 && end > start) {
+      const body = content.slice(start + BLOCK_START_MARKER.length, end);
+      body.split(/\r?\n/).forEach((line) => {
+        const m = line.trim().match(/^0\.0\.0\.0\s+(\S+)/i);
+        if (m) hosts.push(m[1].toLowerCase());
+      });
+    }
+    return { blockedDomains: this.sanitizeWebsites(hosts), blockedHosts: hosts };
   }
 
   // --- Internet block via Windows Firewall (replaces the old Wi-Fi adapter toggle) ---
@@ -1043,10 +1175,11 @@ class PCAgent {
     const ranges = computePublicBlockRanges(serverIp);
     const psArray = ranges.map((r) => `'${r}'`).join(',');
 
+    // -Protocol Any is explicit so UDP/QUIC (HTTP/3 on 443) is covered, not just TCP.
     const script =
       `Remove-NetFirewallRule -DisplayName '${FIREWALL_RULE_NAME}' -ErrorAction SilentlyContinue; ` +
       `New-NetFirewallRule -DisplayName '${FIREWALL_RULE_NAME}' -Group '${FIREWALL_RULE_GROUP}' ` +
-      `-Direction Outbound -Action Block -Enabled True -Profile Any -RemoteAddress @(${psArray}) ` +
+      `-Direction Outbound -Action Block -Enabled True -Profile Any -Protocol Any -RemoteAddress @(${psArray}) ` +
       `-Description '${FIREWALL_RULE_DESC}' | Out-Null`;
     await execAsync(`powershell -NoProfile -Command "${script}"`);
 

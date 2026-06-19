@@ -27,11 +27,33 @@ const ACTION_LABELS = {
 };
 const labelForAction = (a) => ACTION_LABELS[a] || a;
 
-// Normalize a typed domain into a bare host (strip scheme / www / path).
+// Common www/mobile fronts a typed domain is reduced past so the list stores one
+// registrable base per site (the agent re-expands apex + these variants on apply).
+const PEEL_SUBDOMAINS = ['www', 'm', 'web', 'mobile'];
+
+// Normalize a typed domain to its registrable base, matching the agent's
+// normalization so the list mirrors exactly what gets applied. Mobile/www fronts
+// are only peeled while ≥2 labels remain, so "web.com" is never reduced to "com".
 function normalizeDomain(raw) {
   let host = String(raw || '').trim().toLowerCase();
   if (!host) return '';
-  host = host.replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0].trim();
+  host = host
+    .replace(/^[a-z]+:\/\//, '')
+    .split('/')[0]
+    .split('?')[0]
+    .split('#')[0]
+    .split(':')[0]
+    .replace(/\.+$/, '');
+  let prev;
+  do {
+    prev = host;
+    for (const sub of PEEL_SUBDOMAINS) {
+      if (host.startsWith(`${sub}.`)) {
+        const candidate = host.slice(sub.length + 1);
+        if (candidate.includes('.')) host = candidate;
+      }
+    }
+  } while (host !== prev);
   return host;
 }
 
@@ -464,9 +486,12 @@ function ControlActions() {
             <h2 className="text-lg font-semibold text-gray-900">Website Blocking (specific sites)</h2>
           </div>
           <p className="text-sm text-gray-500 mb-4">
-            Blocks only the domains you list (hosts file → 0.0.0.0), leaving the rest of the internet up.
-            Use this for targeted sites; use <span className="font-medium">Internet → Block internet</span> to
-            cut all browsing. Reversible — only a clearly delimited managed section is touched, then DNS is flushed.
+            Blocks only the domains you list (hosts file → 0.0.0.0), with each domain expanded to its
+            <span className="font-medium"> www / m / web</span> variants. While active it also turns off browser
+            Secure DNS (DoH) so the hosts file is actually honored, then flushes DNS. Reversible — only a clearly
+            delimited managed section is touched and Secure DNS is restored on <span className="font-medium">Unblock all</span>.
+            Targeted by design; use <span className="font-medium">Internet → Block internet</span> for a hard cutoff
+            (hosts blocking can't stop a VPN or a direct-IP visit). Needs the agent running as Administrator.
           </p>
 
           <div className="flex gap-2 mb-3">

@@ -233,6 +233,23 @@ const HOSTS_PATH = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
 const BLOCK_START_MARKER = '# DYCICLMS_WEBSITE_BLOCK_START';
 const BLOCK_END_MARKER = '# DYCICLMS_WEBSITE_BLOCK_END';
 
+// A hosts entry matches ONE exact hostname, so blocking "facebook.com" alone
+// leaves www.facebook.com / m.facebook.com reachable (browsers force www/mobile
+// fronts). We collapse every listed domain to its registrable base, then re-block
+// the apex plus these common www / mobile / app subdomains uniformly.
+const BLOCK_SUBDOMAINS = ['www', 'm', 'web', 'mobile'];
+
+// Browser Secure DNS (DNS-over-HTTPS) resolves names over HTTPS and bypasses the
+// OS hosts file entirely — the primary reason hosts blocking silently half-works.
+// While website blocking is active we force DoH OFF via managed policy for each
+// installed browser, and restore it (delete the managed value) when blocking is
+// cleared. Reg writes target HKLM\...\Policies (needs an elevated agent).
+const DOH_POLICY_KEYS = [
+  { browser: 'Edge', key: 'HKLM\\SOFTWARE\\Policies\\Microsoft\\Edge' },
+  { browser: 'Chrome', key: 'HKLM\\SOFTWARE\\Policies\\Google\\Chrome' },
+];
+const DOH_POLICY_VALUE = 'DnsOverHttpsMode';
+
 // --- Network interface selection (robust against virtual / stale NICs) ------
 // The server reaches this guest's HTTP surface (screenshot / overlay-log /
 // diagnose on TCP 5555) by IP, so the agent must report the address the server
@@ -648,6 +665,9 @@ async function executeCommand(command) {
       case 'clear_website_blocklist':
         result = await clearWebsiteBlocklist();
         break;
+      case 'get_website_blocklist':
+        result = await getWebsiteBlocklist();
+        break;
       case 'block_internet':
         result = await blockInternet();
         break;
@@ -681,31 +701,92 @@ async function executeCommand(command) {
   }
 }
 
+// Normalize every entry to a registrable BASE domain: lowercase, strip
+// scheme/path/query/port, then peel known www/mobile fronts (only while a real
+// registrable domain — i.e. ≥2 labels — remains, so "web.com" is never reduced
+// to "com"). "https://Facebook.com/", "www.facebook.com", "m.facebook.com" all
+// collapse to "facebook.com", which is then re-expanded uniformly.
 function sanitizeWebsites(websites) {
   const unique = new Set();
   (Array.isArray(websites) ? websites : []).forEach((entry) => {
     if (!entry || typeof entry !== 'string') return;
     let host = entry.trim().toLowerCase();
-    host = host.replace(/^https?:\/\//, '');
-    host = host.replace(/^www\./, '');
-    host = host.split('/')[0];
-    host = host.trim();
-    if (host) unique.add(host);
+    host = host.replace(/^[a-z]+:\/\//, ''); // strip scheme
+    host = host.split('/')[0].split('?')[0].split('#')[0]; // strip path/query/fragment
+    host = host.split(':')[0]; // strip :port
+    host = host.replace(/\.+$/, '').trim(); // strip trailing dot(s)
+    let prev;
+    do {
+      prev = host;
+      for (const sub of BLOCK_SUBDOMAINS) {
+        if (host.startsWith(`${sub}.`)) {
+          const candidate = host.slice(sub.length + 1);
+          if (candidate.includes('.')) host = candidate; // keep a registrable base
+        }
+      }
+    } while (host !== prev);
+    if (host && host.includes('.') && !/\s/.test(host)) unique.add(host);
   });
   return Array.from(unique);
 }
 
-function buildBlockSection(websites) {
+// Expand each base domain to the full set of hostnames to block (apex + every
+// BLOCK_SUBDOMAINS front), de-duplicated and order-stable.
+function expandHosts(bases) {
+  const hosts = [];
+  const seen = new Set();
+  bases.forEach((base) => {
+    [base, ...BLOCK_SUBDOMAINS.map((s) => `${s}.${base}`)].forEach((h) => {
+      if (!seen.has(h)) {
+        seen.add(h);
+        hosts.push(h);
+      }
+    });
+  });
+  return hosts;
+}
+
+function buildBlockSection(hosts) {
   // Redirect blocked hosts to 0.0.0.0 (the "no route" sink) rather than
   // 127.0.0.1 — this avoids the guest's own loopback services answering and
   // fails the lookup fast on every modern browser.
   const lines = [BLOCK_START_MARKER];
-  websites.forEach((site) => {
-    lines.push(`0.0.0.0 ${site}`);
-    lines.push(`0.0.0.0 www.${site}`);
-  });
+  hosts.forEach((h) => lines.push(`0.0.0.0 ${h}`));
   lines.push(BLOCK_END_MARKER);
   return `\n${lines.join('\n')}\n`;
+}
+
+/**
+ * Force browser Secure DNS (DoH) OFF (mode='off') or restore it (mode='restore')
+ * via managed registry policy for each supported browser. Without this, Chrome/
+ * Edge resolving over DNS-over-HTTPS skip the hosts file and the block silently
+ * fails. Best-effort: writing HKLM\...\Policies needs elevation, so on a non-admin
+ * agent the failures are returned as warnings (hosts blocking still applies; it
+ * just stays DoH-bypassable until the agent runs elevated).
+ * @returns {{ changed: string[], failed: Array<{browser:string,error:string}> }}
+ */
+async function setBrowserSecureDns(mode) {
+  const changed = [];
+  const failed = [];
+  if (process.platform !== 'win32') return { changed, failed };
+  for (const { browser, key } of DOH_POLICY_KEYS) {
+    const cmd =
+      mode === 'off'
+        ? `reg add "${key}" /v ${DOH_POLICY_VALUE} /t REG_SZ /d off /f`
+        : `reg delete "${key}" /v ${DOH_POLICY_VALUE} /f`;
+    try {
+      await execCommand(cmd);
+      changed.push(browser);
+    } catch (err) {
+      const msg = String(err.message || '').split('\n')[0].trim();
+      // Restoring a value that was never set is success, not failure.
+      if (mode === 'restore' && /cannot find|unable to find|was not found|not exist/i.test(msg)) {
+        continue;
+      }
+      failed.push({ browser, error: msg.slice(0, 200) });
+    }
+  }
+  return { changed, failed };
 }
 
 /**
@@ -734,20 +815,50 @@ async function setWebsiteBlocklist(websites) {
     throw new Error('Website blocking is only supported on Windows targets');
   }
 
-  const sanitized = sanitizeWebsites(websites);
-  if (sanitized.length === 0) {
+  const bases = sanitizeWebsites(websites);
+  if (bases.length === 0) {
     throw new Error('No valid websites provided for blocklist');
   }
+  const hosts = expandHosts(bases);
 
   try {
+    // Rewrite the managed section atomically so the file always matches the
+    // desired (expanded) list exactly — no drift, no leftover/half entries.
     const currentHosts = await fs.readFile(HOSTS_PATH, 'utf8');
     const cleanedHosts = removeManagedSection(currentHosts).trimEnd();
-    const blockSection = buildBlockSection(sanitized).replace(/\n/g, '\r\n');
+    const blockSection = buildBlockSection(hosts).replace(/\n/g, '\r\n');
     const nextHosts = `${cleanedHosts}${blockSection}`;
     await fs.writeFile(HOSTS_PATH, nextHosts, 'utf8');
+
+    // Make the hosts file actually be consulted: turn off browser DoH (else it
+    // bypasses hosts), then flush the OS resolver cache so already-resolved
+    // names re-resolve to the 0.0.0.0 sink.
+    const doh = await setBrowserSecureDns('off');
     await flushDns();
-    console.log(`Applied website blocklist for ${sanitized.length} site(s)`);
-    return { blockedSites: sanitized };
+
+    const warnings = [];
+    if (doh.failed.length) {
+      warnings.push(
+        `Could not disable Secure DNS (DoH) for ${doh.failed.map((f) => f.browser).join(', ')} — ` +
+          `run the agent as Administrator or DoH can bypass hosts blocking (${doh.failed[0].error})`,
+      );
+    }
+    console.log(
+      `Applied website blocklist: ${bases.length} domain(s) → ${hosts.length} host(s); ` +
+        `DoH off for [${doh.changed.join(', ') || 'none'}]` +
+        (warnings.length ? ` | WARN: ${warnings.join('; ')}` : ''),
+    );
+    return {
+      success: true,
+      blockedDomains: bases,
+      blockedHosts: hosts,
+      secureDnsDisabledFor: doh.changed,
+      warnings,
+      message:
+        `Blocking ${bases.length} site(s) (${hosts.length} host variants); ` +
+        `Secure DNS off for ${doh.changed.join(', ') || 'no browsers'}` +
+        (warnings.length ? ` — ${warnings.join('; ')}` : ''),
+    };
   } catch (error) {
     throw new Error(`Failed to apply website blocklist: ${error.message}`);
   }
@@ -762,12 +873,62 @@ async function clearWebsiteBlocklist() {
     const currentHosts = await fs.readFile(HOSTS_PATH, 'utf8');
     const cleanedHosts = removeManagedSection(currentHosts);
     await fs.writeFile(HOSTS_PATH, cleanedHosts, 'utf8');
+
+    // Re-enable browser Secure DNS (delete our managed policy) and flush DNS so
+    // the unblock takes effect immediately.
+    const doh = await setBrowserSecureDns('restore');
     await flushDns();
-    console.log('Cleared managed website blocklist');
-    return { cleared: true };
+
+    const warnings = [];
+    if (doh.failed.length) {
+      warnings.push(
+        `Could not restore Secure DNS for ${doh.failed.map((f) => f.browser).join(', ')} (${doh.failed[0].error})`,
+      );
+    }
+    console.log(
+      `Cleared managed website blocklist; restored DoH for [${doh.changed.join(', ') || 'none'}]` +
+        (warnings.length ? ` | WARN: ${warnings.join('; ')}` : ''),
+    );
+    return {
+      success: true,
+      cleared: true,
+      blockedDomains: [],
+      blockedHosts: [],
+      secureDnsRestoredFor: doh.changed,
+      warnings,
+      message: 'Cleared all blocked sites; Secure DNS restored',
+    };
   } catch (error) {
     throw new Error(`Failed to clear website blocklist: ${error.message}`);
   }
+}
+
+/**
+ * Read the ACTUAL managed block set from the guest's hosts file so the UI can
+ * reflect real per-PC applied state instead of trusting an in-memory list that
+ * can desync. Returns the expanded host lines and the collapsed base domains.
+ */
+async function getWebsiteBlocklist() {
+  if (process.platform !== 'win32') {
+    return { blockedDomains: [], blockedHosts: [] };
+  }
+  let content = '';
+  try {
+    content = await fs.readFile(HOSTS_PATH, 'utf8');
+  } catch {
+    return { blockedDomains: [], blockedHosts: [] };
+  }
+  const start = content.indexOf(BLOCK_START_MARKER);
+  const end = content.indexOf(BLOCK_END_MARKER);
+  const hosts = [];
+  if (start !== -1 && end !== -1 && end > start) {
+    const body = content.slice(start + BLOCK_START_MARKER.length, end);
+    body.split(/\r?\n/).forEach((line) => {
+      const m = line.trim().match(/^0\.0\.0\.0\s+(\S+)/i);
+      if (m) hosts.push(m[1].toLowerCase());
+    });
+  }
+  return { blockedDomains: sanitizeWebsites(hosts), blockedHosts: hosts };
 }
 
 async function execCommand(command) {
@@ -798,7 +959,7 @@ async function execCommand(command) {
 const FIREWALL_RULE_NAME = 'DYCI-BlockInternet';
 const FIREWALL_RULE_GROUP = 'DYCI-CLMS';
 const FIREWALL_RULE_DESC =
-  'DYCI CLMS: blocks public internet while keeping the LAN and LMS server reachable so the agent stays controllable. Managed rule — removed by Allow internet.';
+  'DYCI CLMS: blocks public internet while keeping the LAN and LMS server reachable so the agent stays controllable. Managed rule - removed by Allow internet.';
 
 function ipToInt(ip) {
   const parts = String(ip || '').trim().split('.').map(Number);
@@ -868,6 +1029,46 @@ async function isElevated() {
   }
 }
 
+/**
+ * Read back the managed rule's ACTUAL effective properties from Windows Firewall
+ * so we never trust New-NetFirewallRule's silence — the #1 reason "Block internet"
+ * fires yet browsing works is the rule existing-but-inert (firewall profile off) or
+ * never created (no elevation / managed by policy). Returns a small JSON summary:
+ *   { exists, direction, action, enabled, profile, protocol, remoteAddress[], disabledProfiles[] }
+ * `disabledProfiles` lists any Windows Firewall profile that is OFF — a block rule
+ * does nothing on a profile whose firewall is disabled, so we surface that.
+ *
+ * The PS script emits ONE compressed JSON line and contains NO double quotes, so it
+ * survives the cmd.exe -> powershell quoting unscathed.
+ */
+async function getFirewallRuleStatus() {
+  const script =
+    `$ErrorActionPreference='SilentlyContinue'; ` +
+    `$rules=@(Get-NetFirewallRule -DisplayName '${FIREWALL_RULE_NAME}'); ` +
+    `if ($rules.Count -eq 0) { ([pscustomobject]@{exists=$false}) | ConvertTo-Json -Compress } ` +
+    `else { $r=$rules[0]; $pf=$r|Get-NetFirewallPortFilter; $af=$r|Get-NetFirewallAddressFilter; ` +
+    `$disabled=@(Get-NetFirewallProfile | Where-Object {-not $_.Enabled} | ForEach-Object {[string]$_.Name}); ` +
+    `([pscustomobject]@{exists=$true;direction=[string]$r.Direction;action=[string]$r.Action;` +
+    `enabled=[string]$r.Enabled;profile=[string]$r.Profile;protocol=[string]$pf.Protocol;` +
+    `remoteAddress=@($af.RemoteAddress|ForEach-Object{[string]$_});disabledProfiles=$disabled}) ` +
+    `| ConvertTo-Json -Compress -Depth 4 }`;
+  const { stdout } = await execCommand(`powershell -NoProfile -Command "${script}"`);
+  const text = String(stdout || '').trim();
+  let obj;
+  try {
+    obj = JSON.parse(text);
+  } catch {
+    return { exists: false, parseError: text.slice(0, 300) };
+  }
+  // PS5.1 ConvertTo-Json renders single-element arrays as scalars — normalize back.
+  const arr = (v) => (Array.isArray(v) ? v : v == null ? [] : [v]);
+  if (obj && obj.exists) {
+    obj.remoteAddress = arr(obj.remoteAddress);
+    obj.disabledProfiles = arr(obj.disabledProfiles);
+  }
+  return obj;
+}
+
 async function blockInternet() {
   if (process.platform !== 'win32') {
     throw new Error('Internet blocking is only supported on Windows targets');
@@ -881,22 +1082,59 @@ async function blockInternet() {
   const psArray = ranges.map((r) => `'${r}'`).join(',');
 
   // Idempotent: drop any stale managed rule first, then (re)create exactly one.
+  // -Protocol Any is EXPLICIT (not just the default) so UDP/QUIC (HTTP/3 on 443)
+  // is covered — a TCP-only block leaks for HTTP/3 sites.
   const script =
     `Remove-NetFirewallRule -DisplayName '${FIREWALL_RULE_NAME}' -ErrorAction SilentlyContinue; ` +
     `New-NetFirewallRule -DisplayName '${FIREWALL_RULE_NAME}' -Group '${FIREWALL_RULE_GROUP}' ` +
-    `-Direction Outbound -Action Block -Enabled True -Profile Any -RemoteAddress @(${psArray}) ` +
+    `-Direction Outbound -Action Block -Enabled True -Profile Any -Protocol Any -RemoteAddress @(${psArray}) ` +
     `-Description '${FIREWALL_RULE_DESC}' | Out-Null`;
   await execCommand(`powershell -NoProfile -Command "${script}"`);
+
+  // Verify the rule actually exists with the right properties — never trust the
+  // create command's silence. This is what turns a silent failure into a clear
+  // diagnostic on the dashboard chip.
+  const verified = await getFirewallRuleStatus();
+  if (!verified.exists) {
+    throw new Error(
+      `Firewall rule "${FIREWALL_RULE_NAME}" was NOT created (New-NetFirewallRule reported no error but the rule is absent). ` +
+        `Check that the agent is elevated and the firewall is not locked down by Group Policy / third-party security software.` +
+        (verified.parseError ? ` [verify output: ${verified.parseError}]` : ''),
+    );
+  }
+
+  // Build human-readable warnings for anything that would make the rule INEFFECTIVE
+  // even though it exists (so "fires but still browses" is explained, not hidden).
+  const warnings = [];
+  if (!/^true$/i.test(String(verified.enabled))) warnings.push('rule is present but NOT Enabled');
+  if (!/outbound/i.test(String(verified.direction))) warnings.push(`direction is ${verified.direction} (expected Outbound)`);
+  if (!/block/i.test(String(verified.action))) warnings.push(`action is ${verified.action} (expected Block)`);
+  if (!/any/i.test(String(verified.protocol))) warnings.push(`protocol is ${verified.protocol} (expected Any — TCP-only leaks UDP/QUIC)`);
+  if (Array.isArray(verified.disabledProfiles) && verified.disabledProfiles.length) {
+    warnings.push(
+      `Windows Firewall is OFF for profile(s): ${verified.disabledProfiles.join(', ')} — the block will NOT take effect there. ` +
+        `Enable Windows Defender Firewall (Set-NetFirewallProfile -Profile ${verified.disabledProfiles.join(',')} -Enabled True).`,
+    );
+  }
+
+  const summary =
+    `Dir=${verified.direction} Action=${verified.action} Enabled=${verified.enabled} ` +
+    `Profile=${verified.profile} Protocol=${verified.protocol} Ranges=${verified.remoteAddress.length}`;
+  console.log(`[Firewall] Created "${FIREWALL_RULE_NAME}" — ${summary}` + (warnings.length ? ` | WARN: ${warnings.join('; ')}` : ''));
 
   return {
     success: true,
     blocked: true,
     rule: FIREWALL_RULE_NAME,
+    verified,
+    warnings,
     keepReachable: {
       lan: ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16'],
       server: serverIp || null,
     },
-    message: `Blocked public internet via firewall rule "${FIREWALL_RULE_NAME}"; LAN + LMS server stay reachable`,
+    message: warnings.length
+      ? `Blocked rule created but may be INEFFECTIVE — ${warnings.join('; ')} [${summary}]`
+      : `Blocked public internet via "${FIREWALL_RULE_NAME}" [${summary}]; LAN + LMS server stay reachable`,
   };
 }
 
@@ -914,6 +1152,13 @@ async function allowInternet() {
     `{ Remove-NetFirewallRule -DisplayName '${FIREWALL_RULE_NAME}'; 'removed' } else { 'absent' }`;
   const { stdout } = await execCommand(`powershell -NoProfile -Command "${script}"`);
   const removed = /removed/i.test(stdout);
+
+  // Verify the rule is actually gone — don't trust the remove command's silence.
+  const after = await getFirewallRuleStatus();
+  if (after.exists) {
+    throw new Error(`Tried to remove "${FIREWALL_RULE_NAME}" but it is still present — internet may remain blocked. Check Group Policy / security software managing the firewall.`);
+  }
+  console.log(`[Firewall] Allow internet — "${FIREWALL_RULE_NAME}" ${removed ? 'removed' : 'was already absent'}; other rules untouched`);
 
   return {
     success: true,

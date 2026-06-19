@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { io } from 'socket.io-client';
-import { Send, Search, MessageCircle, Smile, Paperclip } from 'lucide-react';
+import { Send, Search, MessageCircle } from 'lucide-react';
 import messagingService from '../../services/messagingService';
 
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:3001';
@@ -405,22 +405,14 @@ function Messaging() {
               {/* Input Area */}
               <div className="p-4 border-t border-gray-200 bg-gray-50">
                 <div className="flex items-center gap-2">
-                  <button className="p-2 hover:bg-gray-100 rounded-full transition-colors">
-                    <Paperclip className="w-5 h-5 text-gray-500" />
-                  </button>
-                  <div className="flex-1 relative">
-                    <input
-                      type="text"
-                      placeholder={`Message ${selectedContact.name}...`}
-                      value={messageInput}
-                      onChange={handleInputChange}
-                      onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
-                      className="w-full px-4 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500"
-                    />
-                    <button className="absolute right-3 top-2 p-1 hover:bg-gray-200 rounded-full transition-colors">
-                      <Smile className="w-4 h-4 text-gray-500" />
-                    </button>
-                  </div>
+                  <input
+                    type="text"
+                    placeholder={`Message ${selectedContact.name}...`}
+                    value={messageInput}
+                    onChange={handleInputChange}
+                    onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
+                    className="flex-1 px-4 py-2 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500"
+                  />
                   <button
                     onClick={handleSendMessage}
                     disabled={!messageInput.trim()}

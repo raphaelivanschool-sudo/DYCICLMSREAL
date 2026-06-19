@@ -19,8 +19,12 @@ const DEFAULT_BLOCKED_WEBSITES = [
   'twitter.com',
   'instagram.com',
   'tiktok.com',
-  'chatgpt',
+  'chatgpt.com',
 ];
+
+// Common www/mobile fronts a domain is reduced past so the list stores one
+// registrable base per site (the agent re-expands apex + these on apply).
+const PEEL_SUBDOMAINS = ['www', 'm', 'web', 'mobile'];
 
 // Helper component for badges
 const Badge = ({ variant, children }) => {
@@ -37,13 +41,30 @@ const Badge = ({ variant, children }) => {
   );
 };
 
+// Reduce a typed entry to its registrable base domain, matching the agent's
+// normalization so the UI list mirrors exactly what gets applied (apex + www +
+// mobile fronts are added back on the guest). Mobile/www fronts are only peeled
+// while ≥2 labels remain, so "web.com" is never reduced to "com".
 function normalizeDomain(value) {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/^https?:\/\//, '')
-    .replace(/^www\./, '')
-    .split('/')[0];
+  let host = String(value || '').trim().toLowerCase();
+  host = host
+    .replace(/^[a-z]+:\/\//, '')
+    .split('/')[0]
+    .split('?')[0]
+    .split('#')[0]
+    .split(':')[0]
+    .replace(/\.+$/, '');
+  let prev;
+  do {
+    prev = host;
+    for (const sub of PEEL_SUBDOMAINS) {
+      if (host.startsWith(`${sub}.`)) {
+        const candidate = host.slice(sub.length + 1);
+        if (candidate.includes('.')) host = candidate;
+      }
+    }
+  } while (host !== prev);
+  return host;
 }
 
 function SecuritySettings() {
@@ -285,6 +306,10 @@ function SecuritySettings() {
                 ? ' Run agent as Administrator on that PC.'
                 : '';
             errors.push(`${computerId}: ${reason}.${permissionHint}`);
+          } else if (Array.isArray(event.result?.warnings) && event.result.warnings.length) {
+            // Applied, but something that weakens the block (e.g. DoH could not be
+            // turned off without elevation) — surface it instead of a silent "OK".
+            errors.push(`${computerId}: ${event.result.warnings.join('; ')}`);
           }
 
           if (expectedIds.size === 0) {

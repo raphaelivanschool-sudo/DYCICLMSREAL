@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { io } from 'socket.io-client';
-import { X, Search, Send, MessageCircle, Users, Plus, Smile, Paperclip } from 'lucide-react';
+import { X, Search, Send, MessageCircle, Users, Plus } from 'lucide-react';
 import messagingService from '../../services/messagingService';
 
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:3001';
@@ -503,22 +503,14 @@ const MessagingModule = ({ isOpen, onClose, userRole }) => {
                 {/* Message Input */}
                 <div className="p-4 bg-white border-t border-gray-200">
                   <div className="flex items-center space-x-2">
-                    <button className="p-2 hover:bg-gray-100 rounded-full transition-colors">
-                      <Paperclip className="w-5 h-5 text-gray-500" />
-                    </button>
-                    <div className="flex-1 relative">
-                      <input
-                        type="text"
-                        value={messageInput}
-                        onChange={handleInputChange}
-                        onKeyPress={handleKeyPress}
-                        placeholder="Type a message..."
-                        className="w-full px-4 py-2.5 bg-gray-100 border-0 rounded-full text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      />
-                      <button className="absolute right-3 top-2 p-1 hover:bg-gray-200 rounded-full transition-colors">
-                        <Smile className="w-4 h-4 text-gray-500" />
-                      </button>
-                    </div>
+                    <input
+                      type="text"
+                      value={messageInput}
+                      onChange={handleInputChange}
+                      onKeyPress={handleKeyPress}
+                      placeholder="Type a message..."
+                      className="flex-1 px-4 py-2.5 bg-gray-100 border-0 rounded-full text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
                     <button
                       onClick={handleSendMessage}
                       disabled={!messageInput.trim()}
