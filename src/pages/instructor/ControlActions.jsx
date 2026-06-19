@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Users, CheckCircle, Lock, MonitorUp, Wifi, WifiOff,
-  MessageSquare, Globe, Plus, X, Send, Power, AlertTriangle, RefreshCw,
+  Users, CheckCircle, Lock, MonitorUp, Ban,
+  MessageSquare, Globe, Plus, X, Send, Power, RefreshCw,
   Square, CheckSquare, Circle, ShieldOff, Monitor,
 } from 'lucide-react';
 import socketService from '../../services/socketService';
@@ -22,8 +22,8 @@ const ACTION_LABELS = {
   message: 'Message',
   set_website_blocklist: 'Block websites',
   clear_website_blocklist: 'Unblock websites',
-  disable_wifi: 'Disable Wi-Fi',
-  enable_wifi: 'Enable Wi-Fi',
+  block_internet: 'Block internet',
+  allow_internet: 'Allow internet',
 };
 const labelForAction = (a) => ACTION_LABELS[a] || a;
 
@@ -47,9 +47,6 @@ function ControlActions() {
   const [broadcastMessage, setBroadcastMessage] = useState('');
   const [showShutdown, setShowShutdown] = useState(false);
   const [shutdownGrace, setShutdownGrace] = useState(60);
-  const [showWifiConfirm, setShowWifiConfirm] = useState(false);
-  const [wifiAutoRestoreMin, setWifiAutoRestoreMin] = useState(5);
-  const [wifiKeepDisabled, setWifiKeepDisabled] = useState(false);
 
   // Website blocklist (managed)
   const [blocklist, setBlocklist] = useState(DEFAULT_BLOCKLIST);
@@ -236,22 +233,13 @@ function ControlActions() {
 
   // ---- Bulk handlers (operate on `targets`) ----
   const handleLock = () => sendToTargets('lock', {}, targets);
-  const handleEnableWifi = () => sendToTargets('enable_wifi', {}, targets);
+  const handleBlockInternet = () => sendToTargets('block_internet', {}, targets);
+  const handleAllowInternet = () => sendToTargets('allow_internet', {}, targets);
 
   const handleConfirmShutdown = async () => {
     const graceSeconds = Math.max(0, Math.min(86400, parseInt(shutdownGrace, 10) || 0));
     setShowShutdown(false);
     await sendToTargets('shutdown', { graceSeconds }, targets);
-  };
-
-  const handleConfirmDisableWifi = async () => {
-    const autoRestoreMinutes = Math.max(1, Math.min(120, parseInt(wifiAutoRestoreMin, 10) || 5));
-    setShowWifiConfirm(false);
-    await sendToTargets(
-      'disable_wifi',
-      { autoRestoreMinutes, keepDisabled: wifiKeepDisabled },
-      targets,
-    );
   };
 
   const handleSendBroadcast = async () => {
@@ -472,12 +460,13 @@ function ControlActions() {
         {/* Website blocking */}
         <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
           <div className="flex items-center gap-2 mb-1">
-            <Globe className="w-5 h-5 text-gray-500" />
-            <h2 className="text-lg font-semibold text-gray-900">Website Blocking</h2>
+            <ShieldOff className="w-5 h-5 text-gray-500" />
+            <h2 className="text-lg font-semibold text-gray-900">Website Blocking (specific sites)</h2>
           </div>
           <p className="text-sm text-gray-500 mb-4">
-            Redirects listed domains to 0.0.0.0 in the guest hosts file (reversible — only a clearly
-            delimited managed section is touched, then DNS is flushed).
+            Blocks only the domains you list (hosts file → 0.0.0.0), leaving the rest of the internet up.
+            Use this for targeted sites; use <span className="font-medium">Internet → Block internet</span> to
+            cut all browsing. Reversible — only a clearly delimited managed section is touched, then DNS is flushed.
           </p>
 
           <div className="flex gap-2 mb-3">
@@ -524,39 +513,40 @@ function ControlActions() {
           </div>
         </div>
 
-        {/* Wi-Fi controls */}
+        {/* Internet controls (firewall) */}
         <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
           <div className="flex items-center gap-2 mb-1">
-            <Wifi className="w-5 h-5 text-gray-500" />
-            <h2 className="text-lg font-semibold text-gray-900">Internet (Wi-Fi)</h2>
+            <Globe className="w-5 h-5 text-gray-500" />
+            <h2 className="text-lg font-semibold text-gray-900">Internet</h2>
           </div>
           <p className="text-sm text-gray-500 mb-4">
-            Toggles the guest Wi-Fi adapter. Disabling always schedules a local auto-restore so a PC
-            is never permanently stranded — even if the server connection is lost.
+            Blocks public internet while keeping the LMS reachable, so PCs stay controllable.
+            Reversible instantly via Allow internet.
           </p>
 
           <div className="space-y-3">
             <button
-              onClick={() => setShowWifiConfirm(true)}
+              onClick={handleBlockInternet}
               className="w-full flex items-center gap-3 p-3 rounded-lg border border-gray-200 hover:border-red-300 hover:bg-red-50 text-gray-700 transition-all"
             >
-              <WifiOff className="w-5 h-5 text-red-500" />
-              <span className="font-medium">Disable Wi-Fi on {targetLabel}</span>
+              <Ban className="w-5 h-5 text-red-500" />
+              <span className="font-medium">Block internet on {targetLabel}</span>
             </button>
             <button
-              onClick={handleEnableWifi}
+              onClick={handleAllowInternet}
               className="w-full flex items-center gap-3 p-3 rounded-lg border border-gray-200 hover:border-green-300 hover:bg-green-50 text-gray-700 transition-all"
             >
-              <Wifi className="w-5 h-5 text-green-500" />
-              <span className="font-medium">Enable Wi-Fi on {targetLabel}</span>
+              <Globe className="w-5 h-5 text-green-500" />
+              <span className="font-medium">Allow internet on {targetLabel}</span>
             </button>
           </div>
 
-          <div className="mt-4 flex items-start gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-3">
-            <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+          <div className="mt-4 flex items-start gap-2 text-xs text-gray-500 bg-gray-50 border border-gray-200 rounded-lg p-3">
+            <Globe className="w-4 h-4 mt-0.5 shrink-0 text-gray-400" />
             <span>
-              Disabling Wi-Fi on a PC that connects over Wi-Fi will cut its control channel. The agent
-              re-enables it automatically after the timeout you set; use “Enable Wi-Fi” to restore sooner.
+              Adds a managed Windows Firewall rule that cuts the public internet but leaves the local
+              network and the LMS server reachable — so the agent stays online and you keep full control.
+              Needs the agent running as Administrator on the guest.
             </span>
           </div>
         </div>
@@ -684,46 +674,6 @@ function ControlActions() {
             confirmIcon={Power}
             danger
             onConfirm={handleConfirmShutdown}
-          />
-        </Modal>
-      )}
-
-      {/* Wi-Fi disable confirmation */}
-      {showWifiConfirm && (
-        <Modal title="Disable Wi-Fi" onClose={() => setShowWifiConfirm(false)}>
-          <div className="flex items-start gap-2 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4">
-            <AlertTriangle className="w-5 h-5 mt-0.5 shrink-0" />
-            <span>
-              This disables the Wi-Fi adapter on <span className="font-medium">{targetLabel}</span>. If a PC
-              connects over Wi-Fi, it will lose its control channel until the adapter is re-enabled. The agent
-              auto-restores it after the timeout below (it runs on the guest, so it works even if the server
-              can’t reach the PC).
-            </span>
-          </div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Auto-restore after (minutes)</label>
-          <input
-            type="number"
-            min={1}
-            max={120}
-            value={wifiAutoRestoreMin}
-            onChange={(e) => setWifiAutoRestoreMin(e.target.value)}
-            disabled={wifiKeepDisabled}
-            className="w-full p-2.5 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 disabled:bg-gray-100 disabled:text-gray-400"
-          />
-          <label className="flex items-center gap-2 mt-3 text-sm text-gray-700">
-            <input
-              type="checkbox"
-              checked={wifiKeepDisabled}
-              onChange={(e) => setWifiKeepDisabled(e.target.checked)}
-            />
-            Keep disabled (no auto-restore) — only re-enabled by an explicit “Enable Wi-Fi”
-          </label>
-          <ModalActions
-            onCancel={() => setShowWifiConfirm(false)}
-            confirmLabel="Disable Wi-Fi"
-            confirmIcon={WifiOff}
-            danger
-            onConfirm={handleConfirmDisableWifi}
           />
         </Modal>
       )}

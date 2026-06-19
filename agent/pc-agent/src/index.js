@@ -24,6 +24,81 @@ const HOSTS_PATH = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
 const BLOCK_START_MARKER = '# DYCICLMS_WEBSITE_BLOCK_START';
 const BLOCK_END_MARKER = '# DYCICLMS_WEBSITE_BLOCK_END';
 
+// ---- Internet block via Windows Firewall (managed outbound block rule) ----
+// Scoped to the PUBLIC IPv4 ranges only so the LAN + LMS server stay reachable and
+// the agent never severs its own control channel. See blockInternet()/allowInternet().
+const FIREWALL_RULE_NAME = 'DYCI-BlockInternet';
+const FIREWALL_RULE_GROUP = 'DYCI-CLMS';
+const FIREWALL_RULE_DESC =
+  'DYCI CLMS: blocks public internet while keeping the LAN and LMS server reachable so the agent stays controllable. Managed rule — removed by Allow internet.';
+
+function ipToInt(ip) {
+  const parts = String(ip || '').trim().split('.').map(Number);
+  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
+    return null;
+  }
+  return parts[0] * 16777216 + parts[1] * 65536 + parts[2] * 256 + parts[3];
+}
+
+function intToIp(n) {
+  return [
+    Math.floor(n / 16777216) % 256,
+    Math.floor(n / 65536) % 256,
+    Math.floor(n / 256) % 256,
+    n % 256,
+  ].join('.');
+}
+
+/**
+ * Return the PUBLIC IPv4 ranges to block as ["a.b.c.d-e.f.g.h", …]: the complement
+ * of the private/reserved ranges we must keep reachable (LAN, link-local, loopback,
+ * multicast/reserved) plus the LMS server IP (carved out automatically).
+ */
+function computePublicBlockRanges(serverIp) {
+  const MAX = 4294967295; // 255.255.255.255
+  const keep = [
+    [0, 16777215],            // 0.0.0.0/8     "this network"
+    [167772160, 184549375],   // 10.0.0.0/8
+    [2130706432, 2147483647], // 127.0.0.0/8   loopback
+    [2851995648, 2852061183], // 169.254.0.0/16 link-local (APIPA)
+    [2886729728, 2887778303], // 172.16.0.0/12
+    [3232235520, 3232301055], // 192.168.0.0/16
+    [3758096384, MAX],        // 224.0.0.0/3   multicast + reserved + broadcast
+  ];
+  const sip = ipToInt(serverIp);
+  if (sip != null) keep.push([sip, sip]);
+
+  keep.sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const [s, e] of keep) {
+    const last = merged[merged.length - 1];
+    if (last && s <= last[1] + 1) last[1] = Math.max(last[1], e);
+    else merged.push([s, e]);
+  }
+
+  const block = [];
+  let cursor = 0;
+  for (const [s, e] of merged) {
+    if (s > cursor) block.push([cursor, s - 1]);
+    cursor = Math.max(cursor, e + 1);
+  }
+  if (cursor <= MAX) block.push([cursor, MAX]);
+  return block.map(([s, e]) => `${intToIp(s)}-${intToIp(e)}`);
+}
+
+/** True only if this agent process can manage firewall rules (Administrator). */
+async function isElevated() {
+  if (process.platform !== 'win32') return false;
+  try {
+    const { stdout } = await execAsync(
+      'powershell -NoProfile -Command "([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)"',
+    );
+    return /true/i.test(stdout);
+  } catch {
+    return false;
+  }
+}
+
 // ---- Local capture-agent (Python, mss) helpers ----
 // Screenshots are captured in-process by the local Python agent and reached over
 // 127.0.0.1 only (never a dialed LAN IP, never a temp .ps1).
@@ -679,11 +754,11 @@ class PCAgent {
         case 'clear_website_blocklist':
           result = await this.clearWebsiteBlocklist();
           break;
-        case 'disable_wifi':
-          result = await this.disableWifiAdapter(params?.adapterName);
+        case 'block_internet':
+          result = await this.blockInternet();
           break;
-        case 'enable_wifi':
-          result = await this.enableWifiAdapter(params?.adapterName);
+        case 'allow_internet':
+          result = await this.allowInternet();
           break;
         default:
           result = { success: false, error: `Unknown command: ${action}` };
@@ -950,69 +1025,62 @@ class PCAgent {
     }
   }
 
-  async disableWifiAdapter(preferredAdapterName) {
+  // --- Internet block via Windows Firewall (replaces the old Wi-Fi adapter toggle) ---
+  // Adds a managed OUTBOUND BLOCK rule scoped to the PUBLIC IPv4 ranges only, so the
+  // LAN + LMS server stay reachable and the agent never severs its own control channel.
+  // (A Block rule overrides Allow in Windows Firewall, so we block the *complement* of
+  // the private/reserved ranges + the server IP rather than "block all + allow server".)
+  async blockInternet() {
     if (process.platform !== 'win32') {
-      throw new Error('Wi-Fi control currently supports Windows only');
+      throw new Error('Internet blocking currently supports Windows only');
+    }
+    if (!(await isElevated())) {
+      throw new Error('Agent is not elevated — run the agent as Administrator to block internet (the firewall rule needs admin).');
     }
 
-    const preferred = String(preferredAdapterName || '').trim();
-    const escapedName = preferred.replace(/'/g, "''");
+    let serverIp = '';
+    try { serverIp = new URL(this.config.serverUrl).hostname; } catch { serverIp = ''; }
+    const ranges = computePublicBlockRanges(serverIp);
+    const psArray = ranges.map((r) => `'${r}'`).join(',');
 
-    const discoverScript = preferred
-      ? `$a = Get-NetAdapter -Name '${escapedName}' -ErrorAction SilentlyContinue; if ($a) { $a.Name }`
-      : "(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' -and ($_.InterfaceDescription -match 'Wireless|Wi-Fi|802\\.11' -or $_.Name -match 'Wi-?Fi|Wireless|WLAN') } | Select-Object -First 1 -ExpandProperty Name)";
-
-    const { stdout: adapterStdout } = await execAsync(`powershell -NoProfile -Command "${discoverScript}"`);
-    const adapterName = adapterStdout.trim();
-
-    if (!adapterName) {
-      throw new Error('No active Wi-Fi adapter found');
-    }
-
-    const disableScript = `Disable-NetAdapter -Name '${adapterName.replace(/'/g, "''")}' -Confirm:$false -PassThru | Out-Null`;
-    await execAsync(`powershell -NoProfile -Command "${disableScript}"`);
+    const script =
+      `Remove-NetFirewallRule -DisplayName '${FIREWALL_RULE_NAME}' -ErrorAction SilentlyContinue; ` +
+      `New-NetFirewallRule -DisplayName '${FIREWALL_RULE_NAME}' -Group '${FIREWALL_RULE_GROUP}' ` +
+      `-Direction Outbound -Action Block -Enabled True -Profile Any -RemoteAddress @(${psArray}) ` +
+      `-Description '${FIREWALL_RULE_DESC}' | Out-Null`;
+    await execAsync(`powershell -NoProfile -Command "${script}"`);
 
     return {
       success: true,
-      disabled: true,
-      adapter: adapterName,
-      message: `Disabled Wi-Fi adapter: ${adapterName}`
+      blocked: true,
+      rule: FIREWALL_RULE_NAME,
+      message: `Blocked public internet via firewall rule "${FIREWALL_RULE_NAME}"; LAN + LMS server stay reachable`,
     };
   }
 
-  async enableWifiAdapter(preferredAdapterName) {
+  async allowInternet() {
     if (process.platform !== 'win32') {
-      throw new Error('Wi-Fi control currently supports Windows only');
+      throw new Error('Internet blocking currently supports Windows only');
+    }
+    if (!(await isElevated())) {
+      throw new Error('Agent is not elevated — run the agent as Administrator to manage the firewall rule.');
     }
 
-    const preferred = String(preferredAdapterName || '').trim();
-    const escapedName = preferred.replace(/'/g, "''");
-
-    const discoverScript = preferred
-      ? `$a = Get-NetAdapter -Name '${escapedName}' -ErrorAction SilentlyContinue; if ($a) { $a.Name }`
-      : "(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Disabled' -and ($_.InterfaceDescription -match 'Wireless|Wi-Fi|802\\.11' -or $_.Name -match 'Wi-?Fi|Wireless|WLAN') } | Select-Object -First 1 -ExpandProperty Name); if (-not $?) { }";
-
-    const { stdout: disabledStdout } = await execAsync(`powershell -NoProfile -Command "${discoverScript}"`);
-    let adapterName = disabledStdout.trim();
-
-    if (!adapterName) {
-      const fallbackScript = "(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceDescription -match 'Wireless|Wi-Fi|802\\.11' -or $_.Name -match 'Wi-?Fi|Wireless|WLAN' } | Select-Object -First 1 -ExpandProperty Name)";
-      const { stdout: anyStdout } = await execAsync(`powershell -NoProfile -Command "${fallbackScript}"`);
-      adapterName = anyStdout.trim();
-    }
-
-    if (!adapterName) {
-      throw new Error('No Wi-Fi adapter found to enable');
-    }
-
-    const enableScript = `Enable-NetAdapter -Name '${adapterName.replace(/'/g, "''")}' -Confirm:$false -PassThru | Out-Null`;
-    await execAsync(`powershell -NoProfile -Command "${enableScript}"`);
+    // Surgical: touch ONLY the managed rule.
+    const script =
+      `if (Get-NetFirewallRule -DisplayName '${FIREWALL_RULE_NAME}' -ErrorAction SilentlyContinue) ` +
+      `{ Remove-NetFirewallRule -DisplayName '${FIREWALL_RULE_NAME}'; 'removed' } else { 'absent' }`;
+    const { stdout } = await execAsync(`powershell -NoProfile -Command "${script}"`);
+    const removed = /removed/i.test(stdout);
 
     return {
       success: true,
-      enabled: true,
-      adapter: adapterName,
-      message: `Enabled Wi-Fi adapter: ${adapterName}`
+      blocked: false,
+      rule: FIREWALL_RULE_NAME,
+      removed,
+      message: removed
+        ? `Allowed internet — removed firewall rule "${FIREWALL_RULE_NAME}"`
+        : 'Internet already allowed — no managed firewall rule present',
     };
   }
 

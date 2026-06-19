@@ -8,6 +8,8 @@ import {
   Search,
   Loader2,
   AlertCircle,
+  Ban,
+  Globe,
 } from 'lucide-react';
 import { agentsApi } from '../../services/api';
 
@@ -60,29 +62,29 @@ function NetworkControl() {
     fetchConnectedMachines();
   }, []);
 
-  const handleDisableWifi = async (machine) => {
-    const key = `${machine.id}-disable`;
+  const handleBlockInternet = async (machine) => {
+    const key = `${machine.id}-block`;
     const machineLabel = machine.user || machine.name || machine.hostname || machine.id;
     try {
       setCommandLoading((prev) => ({ ...prev, [key]: true }));
-      await agentsApi.sendCommand(machine.id, 'disable_wifi', {});
-      showToast(`Disable Wi-Fi command sent to ${machineLabel}`);
+      await agentsApi.sendCommand(machine.id, 'block_internet', {});
+      showToast(`Block internet command sent to ${machineLabel}`);
     } catch (err) {
-      showToast(err?.response?.data?.error || 'Failed to send disable Wi-Fi command.', 'error');
+      showToast(err?.response?.data?.error || 'Failed to send block internet command.', 'error');
     } finally {
       setCommandLoading((prev) => ({ ...prev, [key]: false }));
     }
   };
 
-  const handleEnableWifi = async (machine) => {
-    const key = `${machine.id}-enable`;
+  const handleAllowInternet = async (machine) => {
+    const key = `${machine.id}-allow`;
     const machineLabel = machine.user || machine.name || machine.hostname || machine.id;
     try {
       setCommandLoading((prev) => ({ ...prev, [key]: true }));
-      await agentsApi.sendCommand(machine.id, 'enable_wifi', {});
-      showToast(`Enable Wi-Fi command sent to ${machineLabel}`);
+      await agentsApi.sendCommand(machine.id, 'allow_internet', {});
+      showToast(`Allow internet command sent to ${machineLabel}`);
     } catch (err) {
-      showToast(err?.response?.data?.error || 'Failed to send enable Wi-Fi command.', 'error');
+      showToast(err?.response?.data?.error || 'Failed to send allow internet command.', 'error');
     } finally {
       setCommandLoading((prev) => ({ ...prev, [key]: false }));
     }
@@ -235,52 +237,56 @@ function NetworkControl() {
                   </div>
 
                   <div className="pt-4 border-t border-gray-100">
+                    <p className="text-xs text-gray-500 mb-2">Internet</p>
                     <div className="grid grid-cols-2 gap-2">
                       <button
-                        onClick={() => handleDisableWifi(machine)}
-                        disabled={!isOnline || commandLoading[`${machine.id}-disable`] || commandLoading[`${machine.id}-enable`]}
+                        onClick={() => handleBlockInternet(machine)}
+                        disabled={!isOnline || commandLoading[`${machine.id}-block`] || commandLoading[`${machine.id}-allow`]}
                         className={`h-10 rounded-md text-sm font-medium flex items-center justify-center transition-colors ${
                           !isOnline
                             ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
                             : 'bg-red-600 text-white hover:bg-red-700 disabled:opacity-70'
                         }`}
-                        title={isOnline ? 'Disable Wi-Fi on this connected PC' : 'PC is offline'}
+                        title={isOnline ? 'Block public internet on this PC (LMS stays reachable)' : 'PC is offline'}
                       >
-                        {commandLoading[`${machine.id}-disable`] ? (
+                        {commandLoading[`${machine.id}-block`] ? (
                           <>
                             <Loader2 className="w-4 h-4 mr-2 animate-spin" />
                             Sending...
                           </>
                         ) : (
                           <>
-                            <WifiOff className="w-4 h-4 mr-2" />
-                            Disable Wi-Fi
+                            <Ban className="w-4 h-4 mr-2" />
+                            Block internet
                           </>
                         )}
                       </button>
                       <button
-                        onClick={() => handleEnableWifi(machine)}
-                        disabled={!isOnline || commandLoading[`${machine.id}-enable`] || commandLoading[`${machine.id}-disable`]}
+                        onClick={() => handleAllowInternet(machine)}
+                        disabled={!isOnline || commandLoading[`${machine.id}-allow`] || commandLoading[`${machine.id}-block`]}
                         className={`h-10 rounded-md text-sm font-medium flex items-center justify-center transition-colors ${
                           !isOnline
                             ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
                             : 'bg-green-600 text-white hover:bg-green-700 disabled:opacity-70'
                         }`}
-                        title={isOnline ? 'Enable Wi-Fi on this connected PC' : 'PC is offline'}
+                        title={isOnline ? 'Allow internet again (removes the managed block rule)' : 'PC is offline'}
                       >
-                        {commandLoading[`${machine.id}-enable`] ? (
+                        {commandLoading[`${machine.id}-allow`] ? (
                           <>
                             <Loader2 className="w-4 h-4 mr-2 animate-spin" />
                             Sending...
                           </>
                         ) : (
                           <>
-                            <Wifi className="w-4 h-4 mr-2" />
-                            Enable Wi-Fi
+                            <Globe className="w-4 h-4 mr-2" />
+                            Allow internet
                           </>
                         )}
                       </button>
                     </div>
+                    <p className="mt-2 text-xs text-gray-400">
+                      Blocks public internet while keeping the LMS reachable, so the PC stays controllable. Reversible instantly via Allow internet.
+                    </p>
                   </div>
                 </div>
               </div>

@@ -648,11 +648,11 @@ async function executeCommand(command) {
       case 'clear_website_blocklist':
         result = await clearWebsiteBlocklist();
         break;
-      case 'disable_wifi':
-        result = await disableWifiAdapter(params || {});
+      case 'block_internet':
+        result = await blockInternet();
         break;
-      case 'enable_wifi':
-        result = await enableWifiAdapter(params?.adapterName);
+      case 'allow_internet':
+        result = await allowInternet();
         break;
       case 'screenshot':
         result = await takeScreenshot();
@@ -782,133 +782,147 @@ async function execCommand(command) {
   });
 }
 
-// --- Wi-Fi anti-lockout: local auto-restore timer ---------------------------
-// Disabling the adapter that carries the agent's own Socket.IO connection severs
-// control — it can no longer be re-enabled remotely. So every disable schedules a
-// LOCAL re-enable on the guest (default 5 min) via setTimeout, which keeps running
-// even after the server connection drops (the timer lives in this process, not on
-// the server). An explicit enable_wifi — or a disable with keepDisabled:true —
-// cancels/replaces it, so a PC is never permanently stranded.
-const WIFI_AUTORESTORE_DEFAULT_MIN = 5;
-let wifiAutoRestoreTimer = null;
-let wifiAutoRestoreAdapter = null;
-let wifiAutoRestoreAt = 0;
+// --- Internet block via Windows Firewall (replaces the old Wi-Fi adapter toggle) ---
+//
+// Disabling the Wi-Fi *adapter* used to sever the agent's own control channel — a
+// blocked PC could no longer be re-enabled remotely. Instead we add a managed
+// Windows Firewall OUTBOUND BLOCK rule that cuts the PUBLIC internet while leaving
+// the local subnet and the LMS server reachable, so the agent stays connected and
+// controllable and "Allow internet" takes effect instantly.
+//
+// CRITICAL correctness note: in Windows Firewall a Block rule overrides Allow, so
+// "block everything + allow the server" would also block the agent. We therefore
+// scope the block rule's RemoteAddress to the PUBLIC ranges only — i.e. every IPv4
+// EXCEPT the private/link-local/loopback/multicast ranges and the LMS server IP.
+// That leaves LAN + server reachable and only severs the public internet.
+const FIREWALL_RULE_NAME = 'DYCI-BlockInternet';
+const FIREWALL_RULE_GROUP = 'DYCI-CLMS';
+const FIREWALL_RULE_DESC =
+  'DYCI CLMS: blocks public internet while keeping the LAN and LMS server reachable so the agent stays controllable. Managed rule — removed by Allow internet.';
 
-function clearWifiAutoRestore() {
-  if (wifiAutoRestoreTimer) {
-    clearTimeout(wifiAutoRestoreTimer);
-    wifiAutoRestoreTimer = null;
+function ipToInt(ip) {
+  const parts = String(ip || '').trim().split('.').map(Number);
+  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
+    return null;
   }
-  wifiAutoRestoreAdapter = null;
-  wifiAutoRestoreAt = 0;
+  return parts[0] * 16777216 + parts[1] * 65536 + parts[2] * 256 + parts[3];
 }
 
-function scheduleWifiAutoRestore(adapterName, minutes) {
-  clearWifiAutoRestore();
-  const mins =
-    Number.isFinite(Number(minutes)) && Number(minutes) > 0
-      ? Number(minutes)
-      : WIFI_AUTORESTORE_DEFAULT_MIN;
-  const ms = mins * 60 * 1000;
-  wifiAutoRestoreAdapter = adapterName;
-  wifiAutoRestoreAt = Date.now() + ms;
-  wifiAutoRestoreTimer = setTimeout(async () => {
-    console.log(`[WiFi] Auto-restore firing (anti-lockout) for adapter "${adapterName}"`);
-    try {
-      await enableWifiAdapter(adapterName);
-      console.log('[WiFi] Auto-restore: adapter re-enabled');
-    } catch (err) {
-      console.error('[WiFi] Auto-restore failed:', err.message);
-    } finally {
-      clearWifiAutoRestore();
-    }
-  }, ms);
-  return mins;
+function intToIp(n) {
+  return [
+    Math.floor(n / 16777216) % 256,
+    Math.floor(n / 65536) % 256,
+    Math.floor(n / 256) % 256,
+    n % 256,
+  ].join('.');
 }
 
-async function disableWifiAdapter(options = {}) {
+/**
+ * Return the PUBLIC IPv4 ranges to block as ["a.b.c.d-e.f.g.h", …]: the complement
+ * of the private/reserved ranges we must keep reachable (LAN, link-local, loopback,
+ * multicast/reserved) plus the LMS server IP (carved out automatically — important
+ * when the server happens to sit on a public address).
+ */
+function computePublicBlockRanges(serverIp) {
+  const MAX = 4294967295; // 255.255.255.255
+  const keep = [
+    [0, 16777215],            // 0.0.0.0/8     "this network"
+    [167772160, 184549375],   // 10.0.0.0/8
+    [2130706432, 2147483647], // 127.0.0.0/8   loopback
+    [2851995648, 2852061183], // 169.254.0.0/16 link-local (APIPA)
+    [2886729728, 2887778303], // 172.16.0.0/12
+    [3232235520, 3232301055], // 192.168.0.0/16
+    [3758096384, MAX],        // 224.0.0.0/3   multicast + reserved + broadcast
+  ];
+  const sip = ipToInt(serverIp);
+  if (sip != null) keep.push([sip, sip]); // keep the LMS server reachable even if public
+
+  keep.sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const [s, e] of keep) {
+    const last = merged[merged.length - 1];
+    if (last && s <= last[1] + 1) last[1] = Math.max(last[1], e);
+    else merged.push([s, e]);
+  }
+
+  const block = [];
+  let cursor = 0;
+  for (const [s, e] of merged) {
+    if (s > cursor) block.push([cursor, s - 1]);
+    cursor = Math.max(cursor, e + 1);
+  }
+  if (cursor <= MAX) block.push([cursor, MAX]);
+  return block.map(([s, e]) => `${intToIp(s)}-${intToIp(e)}`);
+}
+
+/** True only if this agent process can manage firewall rules (Administrator). */
+async function isElevated() {
+  if (process.platform !== 'win32') return false;
+  try {
+    const { stdout } = await execCommand(
+      'powershell -NoProfile -Command "([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)"',
+    );
+    return /true/i.test(stdout);
+  } catch {
+    return false;
+  }
+}
+
+async function blockInternet() {
   if (process.platform !== 'win32') {
-    throw new Error('Wi-Fi control is only supported on Windows targets');
+    throw new Error('Internet blocking is only supported on Windows targets');
+  }
+  if (!(await isElevated())) {
+    throw new Error('Agent is not elevated — run the agent as Administrator to block internet (the firewall rule needs admin).');
   }
 
-  // Backwards compatible: a bare adapter-name string is still accepted.
-  const opts = typeof options === 'string' ? { adapterName: options } : (options || {});
-  const preferred = String(opts.adapterName || '').trim();
-  const escapedPreferred = preferred.replace(/'/g, "''");
+  const serverIp = serverHostFromUrl(CONFIG.serverUrl);
+  const ranges = computePublicBlockRanges(serverIp);
+  const psArray = ranges.map((r) => `'${r}'`).join(',');
 
-  const discoverScript = preferred
-    ? `$a = Get-NetAdapter -Name '${escapedPreferred}' -ErrorAction SilentlyContinue; if ($a) { $a.Name }`
-    : "(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' -and ($_.InterfaceDescription -match 'Wireless|Wi-Fi|802\\.11' -or $_.Name -match 'Wi-?Fi|Wireless|WLAN') } | Select-Object -First 1 -ExpandProperty Name)";
-
-  const { stdout } = await execCommand(`powershell -NoProfile -Command "${discoverScript}"`);
-  const adapterName = stdout.trim();
-  if (!adapterName) {
-    throw new Error('No active Wi-Fi adapter found');
-  }
-
-  const escapedName = adapterName.replace(/'/g, "''");
-  const disableScript = `Disable-NetAdapter -Name '${escapedName}' -Confirm:$false -PassThru | Out-Null`;
-  await execCommand(`powershell -NoProfile -Command "${disableScript}"`);
-
-  // Anti-lockout: schedule a local re-enable unless the instructor explicitly
-  // chose to keep it disabled. This survives losing the server connection.
-  const keepDisabled = opts.keepDisabled === true;
-  let autoRestoreMinutes = null;
-  if (keepDisabled) {
-    clearWifiAutoRestore();
-  } else {
-    autoRestoreMinutes = scheduleWifiAutoRestore(adapterName, opts.autoRestoreMinutes);
-  }
+  // Idempotent: drop any stale managed rule first, then (re)create exactly one.
+  const script =
+    `Remove-NetFirewallRule -DisplayName '${FIREWALL_RULE_NAME}' -ErrorAction SilentlyContinue; ` +
+    `New-NetFirewallRule -DisplayName '${FIREWALL_RULE_NAME}' -Group '${FIREWALL_RULE_GROUP}' ` +
+    `-Direction Outbound -Action Block -Enabled True -Profile Any -RemoteAddress @(${psArray}) ` +
+    `-Description '${FIREWALL_RULE_DESC}' | Out-Null`;
+  await execCommand(`powershell -NoProfile -Command "${script}"`);
 
   return {
     success: true,
-    disabled: true,
-    adapter: adapterName,
-    keepDisabled,
-    autoRestoreMinutes,
-    message: keepDisabled
-      ? `Disabled Wi-Fi adapter "${adapterName}" (kept disabled — no auto-restore)`
-      : `Disabled Wi-Fi adapter "${adapterName}"; auto-restore in ${autoRestoreMinutes} min`,
+    blocked: true,
+    rule: FIREWALL_RULE_NAME,
+    keepReachable: {
+      lan: ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16'],
+      server: serverIp || null,
+    },
+    message: `Blocked public internet via firewall rule "${FIREWALL_RULE_NAME}"; LAN + LMS server stay reachable`,
   };
 }
 
-async function enableWifiAdapter(preferredAdapterName) {
+async function allowInternet() {
   if (process.platform !== 'win32') {
-    throw new Error('Wi-Fi control is only supported on Windows targets');
+    throw new Error('Internet blocking is only supported on Windows targets');
+  }
+  if (!(await isElevated())) {
+    throw new Error('Agent is not elevated — run the agent as Administrator to manage the firewall rule.');
   }
 
-  // An explicit enable supersedes any pending anti-lockout auto-restore.
-  clearWifiAutoRestore();
-
-  const preferred = String(preferredAdapterName || '').trim();
-  const escapedPreferred = preferred.replace(/'/g, "''");
-
-  const discoverScript = preferred
-    ? `$a = Get-NetAdapter -Name '${escapedPreferred}' -ErrorAction SilentlyContinue; if ($a) { $a.Name }`
-    : "(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Disabled' -and ($_.InterfaceDescription -match 'Wireless|Wi-Fi|802\\.11' -or $_.Name -match 'Wi-?Fi|Wireless|WLAN') } | Select-Object -First 1 -ExpandProperty Name)";
-
-  const { stdout: disabledStdout } = await execCommand(`powershell -NoProfile -Command "${discoverScript}"`);
-  let adapterName = disabledStdout.trim();
-
-  if (!adapterName) {
-    const fallbackScript = "(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceDescription -match 'Wireless|Wi-Fi|802\\.11' -or $_.Name -match 'Wi-?Fi|Wireless|WLAN' } | Select-Object -First 1 -ExpandProperty Name)";
-    const { stdout: anyStdout } = await execCommand(`powershell -NoProfile -Command "${fallbackScript}"`);
-    adapterName = anyStdout.trim();
-  }
-
-  if (!adapterName) {
-    throw new Error('No Wi-Fi adapter found to enable');
-  }
-
-  const escapedName = adapterName.replace(/'/g, "''");
-  const enableScript = `Enable-NetAdapter -Name '${escapedName}' -Confirm:$false -PassThru | Out-Null`;
-  await execCommand(`powershell -NoProfile -Command "${enableScript}"`);
+  // Surgical: touch ONLY the managed rule; the user's other firewall rules are untouched.
+  const script =
+    `if (Get-NetFirewallRule -DisplayName '${FIREWALL_RULE_NAME}' -ErrorAction SilentlyContinue) ` +
+    `{ Remove-NetFirewallRule -DisplayName '${FIREWALL_RULE_NAME}'; 'removed' } else { 'absent' }`;
+  const { stdout } = await execCommand(`powershell -NoProfile -Command "${script}"`);
+  const removed = /removed/i.test(stdout);
 
   return {
     success: true,
-    enabled: true,
-    adapter: adapterName,
-    message: `Enabled Wi-Fi adapter: ${adapterName}`
+    blocked: false,
+    rule: FIREWALL_RULE_NAME,
+    removed,
+    message: removed
+      ? `Allowed internet — removed firewall rule "${FIREWALL_RULE_NAME}"`
+      : 'Internet already allowed — no managed firewall rule present',
   };
 }
 
